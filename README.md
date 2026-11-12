@@ -1,8 +1,16 @@
-# Hatch 悬浮宠物 · Mac 版（第一步：不联网原型）
+# Hatch 悬浮宠物 · Mac 版（v0.2：接通用通道）
 
 把 Muse 的 5 个日常状态动画做成 macOS 桌面悬浮宠物：无边框透明窗口、始终置顶、
 跨所有桌面空间，播放时用 GPU 着色器实时把视频白底抠成透明（与 Android v0.2 同方案同参数）。
-本步为**不联网原型**：无任何网络代码，状态靠菜单手动切换 + 本地系统事件（睡醒/解锁）点缀。
+
+**v0.2 起接入通用通道（relay）**：在「设置…」里填服务器地址、通道名与 accesskey
+（钥只存 macOS 钥匙串），宠物即按间隔轮询通道状态（state / 一次性事件 / 状态消息），
+状态消息会在宠物上方冒泡显示；未配置钥时自动退回纯本地手动模式。通道服务可自建：
+仓库 `skill/relay-channel/` 是给 Muse 的一键部署 skill，装上后一句话即可在自己的
+Cloudflare 上部署一套同样的通道服务。
+
+分支策略：`main` 分支在正式就绪前保持只有 README，开发全部在 `dev` 分支，
+构建也只由 `dev` 的推送（或手动 Run workflow）触发。
 
 ## 结构
 
@@ -18,7 +26,12 @@ mac/
 │   ├── StateMachine.swift         状态机（2 秒防抖、一次性回落、本地事件不打断忙碌）
 │   ├── PetState.swift             5 个状态定义（idle/working/making 循环，waking/milestone 一次性）
 │   ├── ResourceLocator.swift      资源定位：先 Bundle.main，再 Bundle.module
-│   ├── StatusMenuController.swift 菜单栏图标与菜单
+│   ├── StatusMenuController.swift 菜单栏图标与菜单（通道状态/最新消息/设置入口）
+│   ├── ChannelSettings.swift      通道配置（UserDefaults；钥走钥匙串）
+│   ├── KeychainStore.swift        accesskey 的钥匙串存取（Security 框架）
+│   ├── ChannelPoller.swift        通道轮询（since 增量、错误指数退避、睡眠暂停）
+│   ├── BubbleController.swift     状态消息气泡（宠物上方、6 秒自动消失、点击关闭）
+│   ├── SettingsWindowController.swift 设置窗口（字段/测试连接/详细说明）
 │   ├── PetLog.swift               全量日志（~/Library/Logs/HatchPet.log + NSLog）
 │   └── Resources/                 5 个原始 mp4（480×480 H.264，未重编码）
 ├── Packaging/Info.plist           LSUIElement、com.nonzero.hatchpet.mac、最低系统 13.0
@@ -30,7 +43,7 @@ mac/
 
 本机（Linux）编不了 macOS 应用，走 GitHub Actions 云端 Mac：
 
-1. 把本目录内容推到公开仓的 `main` 分支（自动触发），或在仓库 Actions 页手动 **Run workflow**；
+1. 把本目录内容推到公开仓的 `dev` 分支（自动触发），或在仓库 Actions 页手动 **Run workflow**；
 2. 构建完成后在该次运行的 **Artifacts** 区下载 `HatchPet-mac`（内含 `HatchPet-mac.zip`）。
 
 本地有 Mac 的话也可以直接：`bash assemble_app.sh`（需 Xcode 命令行工具），产物同名。
@@ -46,7 +59,15 @@ mac/
 
 - **拖动**：按住宠物拖到任意位置，松手自动记住位置，下次启动恢复；
 - **菜单栏菜单**：切换状态（待机/办公/做东西/苏醒/里程碑，当前状态打勾）、
-  尺寸（120/160/200/240pt）、触摸穿透、隐藏/显示、退出；
+  尺寸（100/120/160/200/240pt）、触摸穿透、隐藏/显示、设置…、退出；
+  菜单顶部还会显示通道连接状态与最近一条状态消息；
+- **通道模式**：在「设置…」里填好服务器/通道名/accesskey（先点「测试连接」验通再保存），
+  宠物即按所选间隔（5/10/15/30 秒）轮询：通道里的 state 决定宠物状态、
+  event=milestone 触发庆祝、message 以气泡冒出（6 秒自动消失、点击立即消失）；
+  通道数据超过 5 分钟没更新时宠物变暗（alpha 0.55），数据恢复后自动还原；
+  网络出错自动指数退避重试（上限 120 秒），菜单里能看到当前通道状态；
+- **设置说明**：设置窗口底部有逐项说明，包括默认服务器是谁的、自建服务器
+  （用仓库内 `skill/relay-channel` 部署 skill）的方法、钥的存放规矩；
 - **触摸穿透**开启后宠物点不动、拖不动（鼠标事件全穿过），用菜单栏菜单关掉它；
 - **本地事件点缀**：系统/屏幕唤醒、解锁屏幕会插播一遍「刚醒来」（正在办公/做东西时不打断）；
   睡眠/锁屏时自动暂停播放。
@@ -70,4 +91,12 @@ mac/
   普通播放（带白底、保功能），日志里会写明失败原因；
 - **循环方式**：用「播完 seek 回 0」代替 AVPlayerLooper（looper 复制 item 后
   AVPlayerItemVideoOutput 挂载不可靠），循环接缝处可能有极短停顿，实测后评估；
-- 未做：联网轮询与 Muse 真实状态接入（第二步，与 Android 共用同一中转）、开机自启、图标文件。
+- **钥匙串与真机未验**：v0.2 的钥匙串读写、设置窗口、气泡与变暗效果均待 Mac 实测；
+- 未做：开机自启、图标文件；通道长轮询（协议已留 since/seq，后续可加）。
+
+## v0.2 新增验收点
+
+- [ ] 设置窗口：填默认服务器 + hatch-pet 通道 + 钥，测试连接显示 seq/状态/数据时间；保存后菜单通道状态变「已连接」
+- [ ] 用 relay.mjs 往通道写 working + message，宠物应在轮询间隔内切到办公并冒泡显示消息，菜单出现「最新消息」
+- [ ] 写 event=milestone，宠物播一遍庆祝回落；断网/停写 5 分钟后宠物变暗，恢复写入后还原
+- [ ] 尺寸菜单出现 100pt 并可切换；清空钥保存后通道关闭、宠物回本地手动模式
