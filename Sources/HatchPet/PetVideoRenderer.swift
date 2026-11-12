@@ -145,7 +145,9 @@ final class PetVideoRenderer: NSObject, MTKViewDelegate {
         let view = PetMetalView(frame: .zero, device: device)
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        view.isOpaque = false
+        // MTKView.isOpaque 在新版 SDK 是只读属性，透明改走 layer 设置
+        view.wantsLayer = true
+        view.layer?.isOpaque = false
         view.layer?.backgroundColor = NSColor.clear.cgColor
         view.preferredFramesPerSecond = 60
         PetLog.d("Metal 初始化成功 device=\(device.name)")
