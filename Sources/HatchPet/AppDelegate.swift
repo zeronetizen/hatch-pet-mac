@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         PetLog.setup()
-        PetLog.d("HatchPet 启动（v0.2 通道版） bundle=\(Bundle.main.bundlePath) pid=\(ProcessInfo.processInfo.processIdentifier)")
+        PetLog.d("HatchPet 启动（\(AppVersion.displayString)） bundle=\(Bundle.main.bundlePath) pid=\(ProcessInfo.processInfo.processIdentifier)")
         NSApp.setActivationPolicy(.accessory)
 
         // 资源体检：5 个视频逐个定位并记日志，缺失一眼可见
@@ -91,12 +91,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             PetLog.d("设置保存回调：重启轮询器使新配置生效")
             self?.poller.restart()
         }
+        settingsController.onAssetsChanged = { [weak self] state in
+            guard let self else { return }
+            if self.stateMachine.current == state {
+                PetLog.d("形象变更且正播该状态 state=\(state.rawValue)，立即重载播放器")
+                self.renderer.play(state: state)
+            } else {
+                PetLog.d("形象变更 state=\(state.rawValue)（当前状态 \(self.stateMachine.current.rawValue)，下次切到时生效）")
+            }
+        }
 
         setupPoller()
         registerSystemObservers()
         stateMachine.start()
         poller.restart()
         startStaleTimer()
+        // 启动静默检查更新（每天最多一次，失败只记日志；见 UpdateChecker）
+        UpdateChecker.checkOnLaunchIfNeeded()
         PetLog.d("启动完成 state=\(stateMachine.current.rawValue) size=\(Int(size)) clickThrough=\(clickThrough) renderMode=\(renderer.mode) pollerEnabled=\(poller.enabled)")
     }
 

@@ -6,15 +6,17 @@ import AppKit
 /// - 填充：把核心椭圆与每个凸起圆作为同向子路径叠进一条 NSBezierPath，
 ///   用默认的非零缠绕（non-zero）填充，叠加区域自然成并集，不留内部线；
 /// - 描边：不能直接 stroke（会把每个圆的整圈都画出来）。改为先画一份同形、
-///   处处向外扩 1.5pt 的垫底（椭圆半轴 +1.5、每个圆半径 +1.5，近似等距偏移），
-///   垫底露出的 1.5pt 圈即视觉描边；圆点引线同理（先画 r+1.5 垫底再画本体）。
+///   处处向外扩 1.0pt 的垫底（椭圆半轴 +1、每个圆半径 +1，近似等距偏移），
+///   垫底露出的 1.0pt 圈即视觉描边；圆点引线同理（先画 r+1 垫底再画本体）。
+///   v0.11：垫底由 1.5 降到 1.0，凹口处描边显粗的问题随之减轻（等距偏移在凹口
+///   必然略粗，属此法的固有近似，1.0pt 下已不明显）。
 /// 云团与圆点的几何（核心椭圆、各圆圆心/半径，均在本视图坐标系内）由
 /// BubbleController 按「正常朝向」（云在上、圆点在下）算好后下发；面板被迫贴到
 /// 宠物下方时控制器把全部 y 坐标镜像后再下发，本视图不感知朝向。
 /// 点击回调（用于立即关闭气泡）。
 private final class BubbleView: NSView {
-    /// 描边垫底向外扩的距离（pt），即视觉描边粗细。
-    static let outlinePad: CGFloat = 1.5
+    /// 描边垫底向外扩的距离（pt），即视觉描边粗细。v0.11 由 1.5 收窄到 1.0。
+    static let outlinePad: CGFloat = 1.0
 
     var coreEllipse: NSRect = .zero
     var bumps: [(center: NSPoint, radius: CGFloat)] = []
@@ -80,10 +82,16 @@ final class BubbleController {
     /// 保证文字矩形（含四角）始终落在核心椭圆内、不压凸起的凹口。
     private static let corePadX: CGFloat = 30
     private static let corePadY: CGFloat = 24
-    /// 凸起图案（角度°, 半径pt）：固定数组保证云形稳定、不随机；
-    /// 半径按云团大小等比缩放（见 bumpScale），角度按数学方向（90° 为正上方）。
-    private static let bumpAngles: [CGFloat] = [10, 40, 70, 100, 130, 160, 190, 220, 250, 280, 310, 340]
-    private static let bumpRadii: [CGFloat] = [22, 26, 20, 27, 21, 25, 19, 24, 20, 26, 22, 24]
+    /// 凸起图案（角度°, 半径系数）：固定数组保证云形稳定、不随机；角度按数学
+    /// 方向（90° 为正上方），每 30° 一个、底部三个（240/270/300）正对下方。
+    /// v0.11 修匀：旧版半径 19–27 落差过大，且底部凸起圆心都在椭圆周上、
+    /// 下沿参差（左下曾出现单个凸起明显下垂像要滴下来）。新版半径改用相对
+    /// bumpBaseRadius 的系数（0.95–1.13，方差收窄），底部一排再做下沿对齐
+    /// （见 makeLayout），左右两端（0°/180°）系数取中值避免过尖。
+    private static let bumpAngles: [CGFloat] = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
+    private static let bumpBaseRadius: CGFloat = 24
+    private static let bumpFactors: [CGFloat] = [1.00, 1.08, 1.13, 1.05, 1.12, 0.97,
+                                                 1.08, 1.00, 1.12, 1.05, 1.10, 0.95]
     /// 圆点串占高：云下间隙 6 + 大圆直径 10 + 间隙 5 + 小圆直径 7 + 底部余量 2 = 30。
     private static let dotsZoneHeight: CGFloat = 30
 
@@ -173,7 +181,8 @@ final class BubbleController {
         let b = contentH / 2 + corePadY
         // 凸起缩放：以核心尺寸为参照，云越小凸起越收敛（下限 0.6），保证形状比例稳定
         let scale = min(1, max(0.6, min(2 * a, 2 * b * 2.2) / 300))
-        let radii = bumpRadii.map { $0 * scale }
+        let rBase = bumpBaseRadius * scale
+        let radii = bumpFactors.map { $0 * rBase }
         let rMax = radii.max() ?? 0
         let cloudW = 2 * (a + rMax) + 6
         let cloudH = 2 * (b + rMax) + 6
@@ -184,7 +193,16 @@ final class BubbleController {
         var bumps: [(center: NSPoint, radius: CGFloat)] = []
         for (i, deg) in bumpAngles.enumerated() {
             let t = deg * .pi / 180
-            bumps.append((center: NSPoint(x: center.x + a * cos(t), y: center.y + b * sin(t)),
+            var cy = center.y + b * sin(t)
+            // 底部一排（sin ≤ -0.8，即 240°/270°/300°）下沿对齐：把圆心 y 改到
+            // 「圆心 - 半径 = -(b + rBase)」，三者的底边落在同一条线上，谁也不
+            // 单独下垂。对齐量仅由半径差决定（≤ ±0.13·rBase ≈ ±3pt），凸起与
+            // 核心椭圆仍大幅重叠、并集不断裂。两侧下角（210°/330°）不参与对齐，
+            // 保持云团下角自然上收的弧度。
+            if sin(t) <= -0.8 {
+                cy = center.y - (b + rBase) + radii[i]
+            }
+            bumps.append((center: NSPoint(x: center.x + a * cos(t), y: cy),
                           radius: radii[i]))
         }
         // 圆点串：自云团下沿向下，半径 5 → 3.5 递减，略向左（宠物头顶方向）漂移

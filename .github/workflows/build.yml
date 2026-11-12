@@ -41,10 +41,24 @@ jobs:
           name: HatchPet-mac
           path: HatchPet-mac.zip
 
+      # 发版规范（v0.11 起）：正式 Release 的 tag 用语义版本 v<CFBundleShortVersionString>、
+      # 标题含版本号——App 内自助更新（UpdateChecker）按 tag 解析版本比较新旧；
+      # 构建日志仍走上面的 debug-<run> Release，两者互不干扰。
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Packaging/Info.plist)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "正式发版版本：v${VERSION}"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: HatchPet build ${{ github.run_number }}
+          tag_name: v${{ steps.version.outputs.version }}
+          name: HatchPet v${{ steps.version.outputs.version }}
+          body: |
+            HatchPet Mac 版 v${{ steps.version.outputs.version }}（构建 #${{ github.run_number }}）。
+            安装包：HatchPet-mac.zip（解压后右键打开绕过 Gatekeeper）。
+            变更细节见仓库 README 的 v${{ steps.version.outputs.version }} 小节。
           files: HatchPet-mac.zip
           fail_on_unmatched_files: true

@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 /// 保存后经 onSave 回调让 AppDelegate 立即重启轮询器生效。
 final class SettingsWindowController: NSObject {
     var onSave: (() -> Void)?
+    /// 某状态的形象被替换/恢复时回调（AppDelegate 据此让正在播该状态的播放器立即重载）
+    var onAssetsChanged: ((PetState) -> Void)?
 
     private var window: NSWindow?
     private var serverField: NSTextField!
@@ -20,6 +22,9 @@ final class SettingsWindowController: NSObject {
     private var statusLabel: NSTextField!
     private var exportButton: NSButton!
     private var exportHint: NSTextField!
+    /// 「形象」小节每状态一行：来源字 + 恢复默认按钮（key 为状态本身）
+    private var assetRows: [PetState: (source: NSTextField, reset: NSButton)] = [:]
+    private var updateStatusLabel: NSTextField!
 
     private static let helpText = """
     【每个字段是什么】
@@ -42,6 +47,12 @@ final class SettingsWindowController: NSObject {
 
     【把这条通道分享给信任的人】
     设置页下方有「导出 skill 包」：填好 accesskey 并保存后可用。导出的 zip 里装着部署 skill（对方的 Muse 装上它就能部署或对接通道）和一份 pet-channel.json（当前服务器地址、通道名与 accesskey）。拿到这个包的人可以读写你的这条通道——只发给信任的人，不要发到公开场合。
+
+    【自定义形象】
+    「形象」小节可为五个状态各选一个自己的视频（mp4/mov）替换内置动画，例如把官方待机的大头特写换成全身素材。选中的文件会被拷贝到 ~/Library/Application Support/HatchPet/assets/ 下长期保存（原文件之后移动/删除不影响），设置后立即生效；「恢复默认」删掉拷贝、回到内置动画。素材与内置动画走同一套实时抠像：建议正方形、白底视频，与内置素材同规格 480×480 最佳；非白底素材抠像边缘会不干净。内置的待机动画本身是特写构图，这是素材如此，不是显示被裁。
+
+    【检查更新】
+    「关于 / 更新」小节可手动检查更新；应用启动时也会每天静默自动检查一次。更新只从 GitHub 公开仓 zeronetizen/hatch-pet-mac 的 Releases 拉取（检查与下载都走本页配置的代理），下载后先校验新包版本确实更高，确认更新后应用会退出、由一个一次性助手把新版换上并自动重启——钥文件、自定义形象与设置都存在应用之外，不受影响。任何一步失败都会停在旧版并弹窗说明。
     """
 
     func show() {
@@ -57,7 +68,11 @@ final class SettingsWindowController: NSObject {
 
     private func ensureWindow() -> NSWindow {
         if let window { return window }
-        let W: CGFloat = 540, H: CGFloat = 892
+        // v0.11 起多了「形象」「关于/更新」两节，窗口加高到 1060；超过屏幕
+        // 可视高时按屏幕收（下方说明区滚动高度随之变小，布局是光标驱动的、
+        // 整体等比下移，不会错位）。
+        let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
+        let W: CGFloat = 540, H: CGFloat = min(1060, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -183,6 +198,75 @@ final class SettingsWindowController: NSObject {
         content.addSubview(exportWarn)
         cursor -= 34
 
+        // 形象小节（v0.11）：五个状态各一行——来源字 + 选择文件/恢复默认
+        let sep2 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
+        sep2.boxType = .separator
+        content.addSubview(sep2)
+        cursor -= 10
+        let assetsTitle = NSTextField(labelWithString: "形象（按状态自定义）")
+        assetsTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        assetsTitle.frame = NSRect(x: 20, y: cursor - 18, width: 260, height: 18)
+        content.addSubview(assetsTitle)
+        cursor -= 26
+        for (idx, state) in PetState.allCases.enumerated() {
+            let nameLabel = NSTextField(labelWithString: state.label)
+            nameLabel.alignment = .right
+            nameLabel.font = .systemFont(ofSize: 12)
+            nameLabel.frame = NSRect(x: labelX, y: cursor - 22, width: labelW, height: 18)
+            content.addSubview(nameLabel)
+            let source = NSTextField(labelWithString: "内置")
+            source.font = .systemFont(ofSize: 11)
+            source.textColor = .secondaryLabelColor
+            source.lineBreakMode = .byTruncatingMiddle
+            source.frame = NSRect(x: fieldX, y: cursor - 22, width: 150, height: 18)
+            content.addSubview(source)
+            let pickBtn = NSButton(title: "选择文件…", target: self, action: #selector(pickAssetFile(_:)))
+            pickBtn.bezelStyle = .rounded
+            pickBtn.tag = idx
+            pickBtn.frame = NSRect(x: 290, y: cursor - 27, width: 104, height: 26)
+            content.addSubview(pickBtn)
+            let resetBtn = NSButton(title: "恢复默认", target: self, action: #selector(resetAsset(_:)))
+            resetBtn.bezelStyle = .rounded
+            resetBtn.tag = idx
+            resetBtn.frame = NSRect(x: 402, y: cursor - 27, width: 88, height: 26)
+            content.addSubview(resetBtn)
+            assetRows[state] = (source: source, reset: resetBtn)
+            cursor -= 32
+        }
+        let assetsHint = NSTextField(labelWithString: "为状态选自己的视频（mp4/mov）替换内置动画，立即生效。建议正方形、白底、480×480——素材走同一套抠像，白底效果最好。")
+        assetsHint.font = .systemFont(ofSize: 11)
+        assetsHint.textColor = .secondaryLabelColor
+        assetsHint.lineBreakMode = .byWordWrapping
+        assetsHint.maximumNumberOfLines = 2
+        assetsHint.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
+        content.addSubview(assetsHint)
+        cursor -= 36
+
+        // 关于 / 更新小节（v0.11）：当前版本 + 检查更新按钮 + 更新状态行
+        let updateTitle = NSTextField(labelWithString: "关于 / 更新")
+        updateTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        updateTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
+        content.addSubview(updateTitle)
+        cursor -= 26
+        _ = addLabel("当前版本", top: cursor)
+        let curVer = NSTextField(labelWithString: AppVersion.displayString)
+        curVer.font = .systemFont(ofSize: 12)
+        curVer.frame = NSRect(x: fieldX, y: cursor - 22, width: 190, height: 20)
+        content.addSubview(curVer)
+        let checkBtn = NSButton(title: "检查更新", target: self, action: #selector(checkUpdates))
+        checkBtn.bezelStyle = .rounded
+        checkBtn.frame = NSRect(x: 330, y: cursor - 27, width: 110, height: 26)
+        content.addSubview(checkBtn)
+        cursor -= 32
+        updateStatusLabel = NSTextField(labelWithString: "更新源：GitHub 仓 zeronetizen/hatch-pet-mac 的 Releases（经本页代理）；启动时每天自动静默检查一次。")
+        updateStatusLabel.font = .systemFont(ofSize: 11)
+        updateStatusLabel.textColor = .secondaryLabelColor
+        updateStatusLabel.lineBreakMode = .byWordWrapping
+        updateStatusLabel.maximumNumberOfLines = 2
+        updateStatusLabel.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
+        content.addSubview(updateStatusLabel)
+        cursor -= 36
+
         // 详细说明
         let helpLabel = NSTextField(labelWithString: "说明")
         helpLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -245,6 +329,7 @@ final class SettingsWindowController: NSObject {
         updateProxyControls()
         statusLabel.stringValue = "填好后可先测试连接，再保存。"
         refreshExportState()
+        refreshAssetRows()
         PetLog.d("设置窗口已载入 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary) keyPresent=\(keyField.stringValue.isEmpty ? false : true)")
     }
 
@@ -272,6 +357,75 @@ final class SettingsWindowController: NSObject {
                            type: proxyTypePopup.indexOfSelectedItem == 1 ? "socks" : "http",
                            host: host.isEmpty ? ProxyConfig.defaultHost : host,
                            port: port)
+    }
+
+    // MARK: - 形象小节（按状态自定义）
+
+    /// 刷新每个状态行的来源字与「恢复默认」可用性：有自定义且文件在 → 显示源文件
+    /// 名、恢复可用；映射在但文件丢了 → 提示已回退内置；无自定义 → 「内置」。
+    private func refreshAssetRows() {
+        for (state, row) in assetRows {
+            row.source.textColor = .secondaryLabelColor
+            if CustomAssets.customFileName(for: state) != nil {
+                if CustomAssets.customURL(for: state) != nil {
+                    let shown = CustomAssets.customSourceName(for: state)
+                        ?? CustomAssets.customFileName(for: state) ?? ""
+                    row.source.stringValue = "自定义：\(shown)"
+                    row.reset.isEnabled = true
+                } else {
+                    row.source.stringValue = "自定义文件已丢失，已回退内置"
+                    row.reset.isEnabled = true
+                }
+            } else {
+                row.source.stringValue = "内置"
+                row.reset.isEnabled = false
+            }
+        }
+    }
+
+    @objc private func pickAssetFile(_ sender: NSButton) {
+        let state = PetState.allCases[sender.tag]
+        let panel = NSOpenPanel()
+        panel.title = "为「\(state.label)」选择形象视频"
+        panel.message = "建议正方形、白底视频（480×480 最佳）：素材会经与内置动画相同的抠像显示。"
+        panel.allowedContentTypes = [UTType.movie, UTType.video]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else {
+            PetLog.d("形象选择取消 state=\(state.rawValue)")
+            return
+        }
+        PetLog.d("形象选择 state=\(state.rawValue) 源文件=\(url.lastPathComponent)")
+        if let err = CustomAssets.setCustom(state: state, sourceURL: url) {
+            // 回滚语义在 CustomAssets 内（失败不动旧设置）；行尾状态字 + 状态行双提示
+            if let row = assetRows[state] {
+                row.source.stringValue = "替换失败（已保留原形象）"
+                row.source.textColor = .systemRed
+            }
+            statusLabel.stringValue = "「\(state.label)」形象替换失败：\(err)"
+            return
+        }
+        refreshAssetRows()
+        statusLabel.stringValue = "「\(state.label)」形象已替换为：\(url.lastPathComponent)（立即生效）"
+        onAssetsChanged?(state)
+    }
+
+    @objc private func resetAsset(_ sender: NSButton) {
+        let state = PetState.allCases[sender.tag]
+        CustomAssets.clearCustom(state: state)
+        refreshAssetRows()
+        statusLabel.stringValue = "「\(state.label)」形象已恢复为内置动画（立即生效）"
+        onAssetsChanged?(state)
+    }
+
+    // MARK: - 关于 / 更新
+
+    @objc private func checkUpdates() {
+        updateStatusLabel.stringValue = "检查中…（经当前代理设置访问 GitHub）"
+        UpdateChecker.checkManually { [weak self] text in
+            self?.updateStatusLabel.stringValue = text
+        }
     }
 
     // MARK: - Actions
