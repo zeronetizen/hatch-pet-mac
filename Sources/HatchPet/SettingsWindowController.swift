@@ -17,6 +17,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var channelField: NSTextField!
     private var keyField: NSSecureTextField!
     private var keyHint: NSTextField!
+    private var registerButton: NSButton!
+    private var copyPairingButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
     private var proxyTypePopup: NSPopUpButton!
@@ -42,6 +44,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     · 通道名：服务器上的一条通道，相当于一个专属信箱。写入方（例如你的 Muse）和这只宠物用同一个通道名对上头。
     · accesskey：这条通道的钥匙，读写共用同一把。保存在本机应用数据目录的文件中（~/Library/Application Support/HatchPet/keys/<通道名>.key，目录权限 700、文件权限 600），不进系统钥匙串（避免权限弹窗），不写进应用、不打包分发、不上传到任何地方（只在向上面填写的服务器请求时作为身份凭证发送）。注：v0.5 及以前版本把钥存在系统钥匙串里，v0.6 起改存上述文件，旧钥不会自动迁移，升级后在设置里重填一次即可。
     · 轮询间隔：多久去服务器看一次新状态。越短越实时、流量越大；15 秒对桌面宠物足够，流量和耗电都可以忽略。
+
+    【第一次用：先领一条通道】
+    在本页点「注册新通道」，应用会向当前服务器领取一条只属于你的通道和 accesskey，自动填好并即时生效，同时把「配对块」（server / channel / key 三行）复制到剪贴板。把配对块粘贴发给你的智能体（例如你的 Muse），它就能按协议往这条通道写状态，宠物随之动起来。钥只在注册时出现、服务器只存它的哈希，丢了不能找回——重新注册一条新的即可，旧通道放着不管就行。
 
     【默认服务器是谁的】
     默认地址 https://pet.8529527.xyz 是本项目运营的公共通道服务器。用它你需要一条自己的通道和对应的 accesskey：让你的智能体向该服务器的注册接口领取一条即可（协议见仓库根目录 PROTOCOL.md），钥只在领取时出现一次，请收好。你的宠物状态数据（就是一小段 JSON：状态、可选的一句消息、时间戳）会经过它中转。介意的话，完全可以换成你自己的服务器，见下一段。
@@ -137,6 +142,26 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         keyHint.frame = NSRect(x: fieldX, y: cursor - 14, width: fieldW, height: 14)
         content.addSubview(keyHint)
         cursor -= 24
+
+        // 注册新通道 + 复制配对块（v0.17）：没有通道时一键向当前服务器领取
+        _ = addLabel("新通道", top: cursor)
+        registerButton = NSButton(title: "注册新通道", target: self, action: #selector(registerChannel))
+        registerButton.bezelStyle = .rounded
+        registerButton.frame = NSRect(x: fieldX, y: cursor - 28, width: 130, height: 28)
+        content.addSubview(registerButton)
+        copyPairingButton = NSButton(title: "复制配对块", target: self, action: #selector(copyPairing))
+        copyPairingButton.bezelStyle = .rounded
+        copyPairingButton.frame = NSRect(x: fieldX + 140, y: cursor - 28, width: 130, height: 28)
+        content.addSubview(copyPairingButton)
+        cursor -= 32
+        let regHint = NSTextField(labelWithString: "没有通道就点「注册新通道」：向当前服务器领取一条新通道和钥、自动填好，并把配对块复制到剪贴板——粘贴发给你的智能体，它就能往这条通道写状态。已有通道时，「复制配对块」随时可再复制一份。")
+        regHint.font = .systemFont(ofSize: 11)
+        regHint.textColor = .secondaryLabelColor
+        regHint.lineBreakMode = .byWordWrapping
+        regHint.maximumNumberOfLines = 3
+        regHint.frame = NSRect(x: fieldX, y: cursor - 38, width: fieldW, height: 38)
+        content.addSubview(regHint)
+        cursor -= 44
 
         // 轮询间隔
         _ = addLabel("轮询间隔", top: cursor)
@@ -611,6 +636,77 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
                 PetLog.d("测试连接成功 seq=\(seq) \(stateText)")
             }
         }.resume()
+    }
+
+    // MARK: - 注册新通道 / 配对块（v0.17）
+
+    /// 向当前服务器 POST /register 领取一条新通道：成功后自动填服务器/通道/钥
+    /// 三个字段并即时应用（钥经既有 persistKey 落盘本机文件），配对块自动复制
+    /// 到剪贴板。日志只记通道名与钥长度，绝不记钥原文。
+    @objc private func registerChannel() {
+        let base = currentServerBase()
+        guard let url = URL(string: "\(base)/register") else {
+            statusLabel.stringValue = "注册失败：服务器地址格式不对。"
+            PetLog.d("注册未执行：服务器地址格式不对 base=\(base)")
+            return
+        }
+        registerButton.isEnabled = false
+        statusLabel.stringValue = "正在向 \(base) 注册新通道…"
+        PetLog.d("注册新通道 POST \(base)/register")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        let session = RelaySession.makeSession(proxy: proxyFromFields())
+        session.dataTask(with: request) { [weak self] data, response, error in
+            session.finishTasksAndInvalidate()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.registerButton.isEnabled = true
+                if let error {
+                    self.statusLabel.stringValue = "注册失败：\(error.localizedDescription)"
+                    PetLog.d("注册网络错误：\(error.localizedDescription)")
+                    return
+                }
+                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
+                guard http == 201, let data,
+                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let channel = obj["channel"] as? String, !channel.isEmpty,
+                      let key = obj["key"] as? String, !key.isEmpty else {
+                    self.statusLabel.stringValue = http == 429
+                        ? "注册失败：太频繁了（服务器限频），过一会儿再试。"
+                        : "注册失败：服务器返回 HTTP \(http)（这个服务器可能不支持自助注册）。"
+                    PetLog.d("注册失败 HTTP \(http)")
+                    return
+                }
+                self.serverField.stringValue = base
+                self.channelField.stringValue = channel
+                self.keyField.stringValue = key
+                self.applyFromFields(feedback: "已注册通道「\(channel)」并生效，配对块已复制到剪贴板——粘贴发给你的智能体即可。")
+                self.copyPairingBlock(server: base, channel: channel, key: key)
+                PetLog.d("注册成功 channel=\(channel) keyLen=\(key.count)（钥不记日志）")
+            }
+        }.resume()
+    }
+
+    /// 把当前配置（服务器/通道/本机已存钥）组装成配对块复制到剪贴板。
+    @objc private func copyPairing() {
+        let channel = currentChannelName()
+        guard !channel.isEmpty, let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
+            statusLabel.stringValue = "复制配对块失败：当前通道还没有保存在本机的 accesskey（先注册新通道，或填入钥、回车存入本机）。"
+            PetLog.d("复制配对块失败 channel=\(channel)：本机无钥")
+            return
+        }
+        copyPairingBlock(server: currentServerBase(), channel: channel, key: key)
+        statusLabel.stringValue = "配对块已复制：把三行（server/channel/key）发给你的智能体，它就能往这条通道写状态。配对块含钥，只发给信任的对象。"
+        PetLog.d("配对块已复制 channel=\(channel)（钥不记日志）")
+    }
+
+    private func copyPairingBlock(server: String, channel: String, key: String) {
+        let block = "server: \(server)\nchannel: \(channel)\nkey: \(key)"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(block, forType: .string)
     }
 
     // MARK: - 导出 skill 包

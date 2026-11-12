@@ -15,6 +15,12 @@ import AppKit
 ///   顶部呈「两瓣一鞍」。公式与离线渲染预览逐项对齐后才合入（预览图存
 ///   cloud-v0.16-preview.png，三档文字尺寸均验过：起伏可辨、处处光滑、
 ///   无单瓣下垂、文字安全区在云内）。
+/// - v0.17（wave=v5）：用户仍评 v4 抽象（「像颗豆」），拍板换回并集路线，
+///   但凸起要少而大：核心椭圆 + 沿顶部一排 5 个大圆，轮廓取并集的径向
+///   包络（自云心发 720 条射线、各形状出口取最大），再做一圈小窗平滑
+///   抹掉并集交点的小尖，72 点样条成形。并集天然 ≥ 核心椭圆，文字安全
+///   区不变；底部仍是核心椭圆并轻压平（×0.88）。常量与离线渲染
+///   （cloud-v5-preview.png，用户已认可的示意轮廓）对齐后合入。
 /// 云形路径（视图坐标）与圆点几何由 BubbleController 按「正常朝向」（云在上、
 /// 圆点在下）算好下发；面板被迫贴到宠物下方时控制器把路径整体 y 镜像后下发，
 /// 本视图不感知朝向。
@@ -122,7 +128,7 @@ final class BubbleController {
         }
         // 显示时长随行数：1 行 6 秒 / 2 行 8 秒 / 3 行 10 秒
         let duration: TimeInterval = lines <= 1 ? 6.0 : (lines == 2 ? 8.0 : 10.0)
-        PetLog.d("气泡显示 shape=cloud wave=v4 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
+        PetLog.d("气泡显示 shape=cloud wave=v5 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
         hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             self?.hide(reason: "到时自动（\(Int(duration)) 秒）")
@@ -147,41 +153,71 @@ final class BubbleController {
 
     // MARK: - 布局
 
-    /// 云轮廓控制点（原点为云中心）：核心椭圆每 30° 一个、共 12 个。
-    /// wave=v4（v0.16）公式两层：
-    /// ① 半径调制 m = 1 + 0.05·sin(3θ) + 0.015·sin(5θ) + 0.012·sin(2θ+0.9)：
-    ///    sin(3θ) 主导（在 θ=0/π 尖端处恒为 0、两肩 30°/150° 最大），
-    ///    sin(5θ) 给一点不规则小起伏，sin(2θ) 留一丝不对称；底部点
-    ///    （sinθ ≤ -0.7）调制减半，下沿保持平齐。
-    /// ② 上沿瓣位移（只叠加在 sinθ > 0 的点）：以未调制 x 为键，左右
-    ///    x = ±0.52a 各一个 cos² 窗瓣（窗宽 0.50a）、x = 0 一个 0.30 权重的
-    ///    矮瓣，瓣高 H = 0.30b；顶部由此呈「两瓣一鞍」——鞍底（x=0 处轮廓
-    ///    约 1.05b）仍在核心椭圆之上，瓣只加 room、不侵占文字安全区。
-    /// 常量与离线预览（cloud-v0.16-preview.png）逐项对齐，勿凭手感改。
-    private static func cloudControlPoints(a: CGFloat, b: CGFloat) -> [NSPoint] {
-        var pts: [NSPoint] = []
-        let lobeH = 0.30 * b
-        for i in 0..<12 {
-            let t = CGFloat(i) * .pi / 6
-            var m: CGFloat = 1 + 0.05 * sin(3 * t) + 0.015 * sin(5 * t) + 0.012 * sin(2 * t + 0.9)
-            if sin(t) <= -0.7 { m = 1 + (m - 1) * 0.5 }
-            var y = b * sin(t) * m
-            if sin(t) > 0 {
-                let xa = a * cos(t)   // 瓣窗按未调制 x 定位，不随 m 漂移
-                y += lobeH * (lobeWindow((xa - 0.52 * a) / (0.50 * a))
-                              + 0.30 * lobeWindow(xa / (0.50 * a))
-                              + lobeWindow((xa + 0.52 * a) / (0.50 * a)))
+    /// 云轮廓点（原点为云中心），wave=v5（v0.17）：核心椭圆 + 5 个大圆的
+    /// 并集径向包络。圆的排布（x、y、r 均以 b 为单位，沿顶部一排、中间最高）：
+    /// (-1.30, 0.38, 0.84)、(-0.55, 0.38, 1.03)、(0.30, 0.38, 1.13)、
+    /// (1.10, 0.38, 0.92)、(1.70, 0.32, 0.63)。自原点 (0, 0.05b) 发 720 条
+    /// 射线，每条取与全部形状交点出口的最大值即并集外轮廓；半径序列做
+    /// 9 点圆环滑动平均抹掉交点小尖；每 10 步取一点共 72 点交给闭合样条；
+    /// 原点以下纵坐标 ×0.88 把底部压平。包络恒 ≥ 核心椭圆（并集定义），
+    /// 文字安全区与旧版一致。常量与离线渲染逐项对齐，勿凭手感改。
+    private static func cloudOutlinePoints(a: CGFloat, b: CGFloat) -> [NSPoint] {
+        let bumps: [(x: CGFloat, y: CGFloat, r: CGFloat)] = [
+            (-1.30, 0.38, 0.84), (-0.55, 0.38, 1.03), (0.30, 0.38, 1.13),
+            (1.10, 0.38, 0.92), (1.70, 0.32, 0.63),
+        ]
+        let ox: CGFloat = 0, oy: CGFloat = 0.05 * b
+        let steps = 720
+        var radii: [CGFloat] = []
+        radii.reserveCapacity(steps)
+        for i in 0..<steps {
+            let t = 2 * CGFloat.pi * CGFloat(i) / CGFloat(steps)
+            let dx = cos(t), dy = sin(t)
+            var best: CGFloat = 0
+            // 核心椭圆（圆心在云中心、半轴 a/b）的射线出口
+            do {
+                let ex = ox, ey = oy
+                let A = (dx / a) * (dx / a) + (dy / b) * (dy / b)
+                let B = 2 * (ex * dx / (a * a) + ey * dy / (b * b))
+                let C = (ex / a) * (ex / a) + (ey / b) * (ey / b) - 1
+                let disc = B * B - 4 * A * C
+                if disc >= 0 {
+                    let sq = sqrt(disc)
+                    best = max(best, (-B + sq) / (2 * A), (-B - sq) / (2 * A))
+                }
             }
-            pts.append(NSPoint(x: a * cos(t) * m, y: y))
+            // 5 个大圆的射线出口
+            for bump in bumps {
+                let cx = bump.x * b, cy = bump.y * b, r = bump.r * b
+                let ex = ox - cx, ey = oy - cy
+                let A = dx * dx + dy * dy
+                let B = 2 * (ex * dx + ey * dy)
+                let C = ex * ex + ey * ey - r * r
+                let disc = B * B - 4 * A * C
+                if disc < 0 { continue }
+                let sq = sqrt(disc)
+                best = max(best, (-B + sq) / (2 * A), (-B - sq) / (2 * A))
+            }
+            radii.append(best)
+        }
+        // 9 点圆环滑动平均：抹掉并集交点的小尖，保留大凸起的起伏
+        let half = 4
+        var smooth: [CGFloat] = []
+        smooth.reserveCapacity(steps)
+        for i in 0..<steps {
+            var sum: CGFloat = 0
+            for k in -half...half { sum += radii[(i + k + steps) % steps] }
+            smooth.append(sum / CGFloat(2 * half + 1))
+        }
+        var pts: [NSPoint] = []
+        for i in stride(from: 0, to: steps, by: 10) {
+            let t = 2 * CGFloat.pi * CGFloat(i) / CGFloat(steps)
+            let x = ox + smooth[i] * cos(t)
+            var y = oy + smooth[i] * sin(t)
+            if y < oy { y = oy + (y - oy) * 0.88 }   // 底部压平
+            pts.append(NSPoint(x: x, y: y))
         }
         return pts
-    }
-
-    /// 瓣窗 g(u) = cos²(πu/2)，|u| ≥ 1 时为 0：瓣心最高、向两侧平滑收零。
-    private static func lobeWindow(_ u: CGFloat) -> CGFloat {
-        guard abs(u) < 1 else { return 0 }
-        let c = cos(u * .pi / 2)
-        return c * c
     }
 
     /// Catmull-Rom 闭合样条 → 三次贝塞尔：曲线过全部控制点、无尖角，一次成形。
@@ -208,7 +244,7 @@ final class BubbleController {
     private static func makeLayout(contentW: CGFloat, contentH: CGFloat) -> Layout {
         let a = contentW / 2 + corePadX          // 核心椭圆半轴
         let b = contentH / 2 + corePadY
-        let path = closedSplinePath(through: cloudControlPoints(a: a, b: b))
+        let path = closedSplinePath(through: cloudOutlinePoints(a: a, b: b))
         let bounds = path.bounds
         let margin: CGFloat = 8
         let cloudW = bounds.width + margin
