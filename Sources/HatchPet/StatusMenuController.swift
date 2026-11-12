@@ -59,7 +59,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     /// 状态栏图标：Packaging/status-icon.png（36×36）+ status-icon@2x.png（72×72），
-    /// 由 ~/assets/avatar/reference/hatch.jpg 头部裁切生成（见 Packaging 同名文件），
+    /// 由 ~/assets/avatar/reference/hatch.jpg 头部裁切生成（见 Packaging 同名文件）；
+    /// v0.15 起套 squircle 圆角 alpha 遮罩（半径 22.5%，与 App 图标同风格）、四角
+    /// 透明——旧版是直角白底方图，真机反馈在菜单栏里像贴纸。
     /// assemble_app.sh 将其平铺进 Contents/Resources（Bundle.main），
     /// SwiftPM 资源里各有一份副本（Bundle.module 回退，与视频同策略）。
     /// 两档像素拼进同一 NSImage 的两个表征，系统按屏幕倍率自选；显示尺寸 18pt。

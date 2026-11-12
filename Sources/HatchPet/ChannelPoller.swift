@@ -40,7 +40,7 @@ final class ChannelPoller {
         inFlight = false
         let cfg = ChannelSettings.load()
         config = cfg
-        // 每次重启按当前设置重建会话（代理改动保存后即经此生效）
+        // 每次重启按当前设置重建会话（v0.15 起设置即时生效，改动即经此落地）
         session?.invalidateAndCancel()
         session = RelaySession.makeSession(proxy: cfg.proxy)
         key = ChannelSettings.accessKey(for: cfg.channel)

@@ -90,8 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
         }
 
-        settingsController.onSave = { [weak self] in
-            PetLog.d("设置保存回调：重启轮询器使新配置生效")
+        settingsController.onApplied = { [weak self] in
+            PetLog.d("设置即时应用回调：重启轮询器使新配置生效（按新配置重建会话）")
             self?.poller.restart()
         }
         settingsController.onAssetsChanged = { [weak self] state in

@@ -3,9 +3,12 @@ import UniformTypeIdentifiers
 
 /// 设置窗口：通道服务器 / 通道名 / accesskey（本机钥文件）/ 轮询间隔 / 代理 + 测试连接 + 导出 skill 包 + 详细说明。
 /// 服务器、通道名、间隔存 UserDefaults；accesskey 只存本机钥文件（权限 600，见 KeyFileStore），不用系统钥匙串。
-/// 保存后经 onSave 回调让 AppDelegate 立即重启轮询器生效。
-final class SettingsWindowController: NSObject {
-    var onSave: (() -> Void)?
+/// v0.15 起全量即时生效（macOS 系统设置风格，无「保存」按钮）：开关/下拉变更即落盘
+/// 应用；文本框在编辑结束（回车或失焦）时落盘应用。每次应用后经 onApplied 回调让
+/// AppDelegate 重启轮询器（按新配置重建会话）；关窗不回滚。
+final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
+    /// 任一改动即时应用后回调（AppDelegate 据此重启轮询器使新配置生效）
+    var onApplied: (() -> Void)?
     /// 某状态的形象被替换/恢复时回调（AppDelegate 据此让正在播该状态的播放器立即重载）
     var onAssetsChanged: ((PetState) -> Void)?
 
@@ -25,8 +28,15 @@ final class SettingsWindowController: NSObject {
     /// 「形象」小节每状态一行：来源字 + 恢复默认按钮（key 为状态本身）
     private var assetRows: [PetState: (source: NSTextField, reset: NSButton)] = [:]
     private var updateStatusLabel: NSTextField!
+    /// 回填字段时置真，抑制 programmatic change 误触发即时应用（见 loadIntoFields）
+    private var isLoading = false
+    /// 最近一次已应用的字段快照（关窗时若与当前字段不一致，自动提交一次防丢失）
+    private var appliedSnapshot: String?
 
     private static let helpText = """
+    【先说清：本页没有保存按钮】
+    所有改动即时生效：开关、下拉、按钮一点即生效；文本框（服务器地址、通道名、accesskey、代理主机/端口）在按回车或点到别处时生效。状态行会回一句「已生效：…」。关窗不回滚——关掉窗口，已生效的改动保留。
+
     【每个字段是什么】
     · 服务器地址：通道服务的地址。宠物定时到这个地址读取最新状态。本应用不直连任何其他服务器。
     · 通道名：服务器上的一条通道，相当于一个专属信箱。写入方（例如你的 Muse）和这只宠物用同一个通道名对上头。
@@ -40,16 +50,16 @@ final class SettingsWindowController: NSObject {
     本仓库附带一个给 Muse 用的部署 skill：skill/relay-channel（SKILL.md + assets/ 里是服务端全部代码）。把它装进你自己的 Muse，然后对它说一句「用 skill/relay-channel 部署我自己的通道」，它会引导你在你自己的 Cloudflare 账号上一键部署一套同样的通道服务、建好第一条通道，并把新服务器的地址和 accesskey 交给你。把那两个值填回本设置页即可，之后数据只走你自己的服务器。为安全起见，部署时 Cloudflare 的 API token 走安全凭证流程，不要把任何密钥明文粘贴到聊天或文件里。
 
     【测试连接报 TLS 错误怎么办】
-    默认服务器域名（*.workers.dev）在某些网络下直连会被干扰，TLS 握手直接失败。这不是钥或通道填错。办法一：在你的代理客户端（如 mihomo）里把 workers.dev 设为走代理。办法二：用本页的「代理」小节——勾选「使用代理连接服务器」，填本机代理客户端的监听地址（混合端口如 127.0.0.1:7890 选 HTTP；纯 SOCKS5 端口选 SOCKS5），保存后轮询与测试连接都会经它出海，与系统 TUN 规则互不影响。
+    默认服务器域名（*.workers.dev）在某些网络下直连会被干扰，TLS 握手直接失败。这不是钥或通道填错。办法一：在你的代理客户端（如 mihomo）里把 workers.dev 设为走代理。办法二：用本页的「代理」小节——勾选「使用代理连接服务器」，填本机代理客户端的监听地址（混合端口如 127.0.0.1:7890 选 HTTP；纯 SOCKS5 端口选 SOCKS5），勾选即时生效，轮询与测试连接都会经它出海，与系统 TUN 规则互不影响。
 
     【没配置会怎样】
-    accesskey 留空（保存后即删除本机钥文件）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
+    accesskey 清空（即时删除本机钥文件）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
 
     【长时间没新状态会变淡】
     通道数据超过 20 分钟没有更新时，宠物会在随后一分钟里缓慢变淡（到 75% 不透明），表示对端暂时失联；这不是故障，也不会一步突然透明。一旦收到新数据，会立即平滑恢复全亮。
 
     【把这条通道分享给信任的人】
-    设置页下方有「导出 skill 包」：填好 accesskey 并保存后可用。导出的 zip 里装着部署 skill（对方的 Muse 装上它就能部署或对接通道）和一份 pet-channel.json（当前服务器地址、通道名与 accesskey）。拿到这个包的人可以读写你的这条通道——只发给信任的人，不要发到公开场合。
+    设置页下方有「导出 skill 包」：填好 accesskey（即时存入本机钥文件）后即可用。导出的 zip 里装着部署 skill（对方的 Muse 装上它就能部署或对接通道）和一份 pet-channel.json（当前服务器地址、通道名与 accesskey）。拿到这个包的人可以读写你的这条通道——只发给信任的人，不要发到公开场合。
 
     【自定义形象】
     「形象」小节可为五个状态各选一个自己的视频（mp4/mov）替换内置动画，例如把官方待机的大头特写换成全身素材。选中的文件会被拷贝到 ~/Library/Application Support/HatchPet/assets/ 下长期保存（原文件之后移动/删除不影响），设置后立即生效；「恢复默认」删掉拷贝、回到内置动画。素材与内置动画走同一套实时抠像：建议正方形、白底视频，与内置素材同规格 480×480 最佳；非白底素材抠像边缘会不干净。内置的待机动画本身是特写构图，这是素材如此，不是显示被裁。
@@ -81,6 +91,7 @@ final class SettingsWindowController: NSObject {
                            backing: .buffered, defer: false)
         win.title = "HatchPet 设置"
         win.isReleasedWhenClosed = false
+        win.delegate = self // 关窗前把未提交的文本编辑自动提交一次（见 windowWillClose）
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
         win.contentView = content
 
@@ -101,6 +112,7 @@ final class SettingsWindowController: NSObject {
         _ = addLabel("服务器地址", top: cursor)
         serverField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW, height: 24))
         serverField.placeholderString = ChannelSettings.defaultServer
+        serverField.delegate = self
         content.addSubview(serverField)
         cursor -= 36
 
@@ -108,6 +120,7 @@ final class SettingsWindowController: NSObject {
         _ = addLabel("通道名", top: cursor)
         channelField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW, height: 24))
         channelField.placeholderString = ChannelSettings.defaultChannel
+        channelField.delegate = self
         content.addSubview(channelField)
         cursor -= 36
 
@@ -115,6 +128,7 @@ final class SettingsWindowController: NSObject {
         _ = addLabel("accesskey", top: cursor)
         keyField = NSSecureTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW, height: 24))
         keyField.placeholderString = "粘贴通道的 accesskey（只存本机文件）"
+        keyField.delegate = self
         content.addSubview(keyField)
         cursor -= 26
         keyHint = NSTextField(labelWithString: "")
@@ -131,6 +145,8 @@ final class SettingsWindowController: NSObject {
             intervalPopup.addItem(withTitle: "\(sec) 秒")
             intervalPopup.itemArray.last?.representedObject = sec
         }
+        intervalPopup.target = self
+        intervalPopup.action = #selector(intervalChanged)
         content.addSubview(intervalPopup)
         cursor -= 40
 
@@ -142,12 +158,16 @@ final class SettingsWindowController: NSObject {
         cursor -= 34
         proxyTypePopup = NSPopUpButton(frame: NSRect(x: fieldX, y: cursor - 26, width: 96, height: 26), pullsDown: false)
         proxyTypePopup.addItems(withTitles: ["HTTP", "SOCKS5"])
+        proxyTypePopup.target = self
+        proxyTypePopup.action = #selector(proxyTypeChanged)
         content.addSubview(proxyTypePopup)
         proxyHostField = NSTextField(frame: NSRect(x: fieldX + 104, y: cursor - 24, width: 176, height: 24))
         proxyHostField.placeholderString = ProxyConfig.defaultHost
+        proxyHostField.delegate = self
         content.addSubview(proxyHostField)
         proxyPortField = NSTextField(frame: NSRect(x: fieldX + 288, y: cursor - 24, width: 84, height: 24))
         proxyPortField.placeholderString = "\(ProxyConfig.defaultPort)"
+        proxyPortField.delegate = self
         content.addSubview(proxyPortField)
         cursor -= 32
         let proxyHint = NSTextField(labelWithString: "直连服务器失败（如 TLS 错误）时，可填本机代理客户端的监听地址，例如 mihomo/Clash 的 127.0.0.1:7890（混合端口选 HTTP 即可）。")
@@ -164,7 +184,7 @@ final class SettingsWindowController: NSObject {
         testBtn.bezelStyle = .rounded
         testBtn.frame = NSRect(x: fieldX, y: cursor - 28, width: 110, height: 28)
         content.addSubview(testBtn)
-        statusLabel = NSTextField(labelWithString: "填好后可先测试连接，再保存。")
+        statusLabel = NSTextField(labelWithString: "所有改动即时生效：填好可直接点测试连接。")
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.maximumNumberOfLines = 3
@@ -287,17 +307,12 @@ final class SettingsWindowController: NSObject {
         scroll.documentView = textView
         content.addSubview(scroll)
 
-        // 底部按钮
-        let saveBtn = NSButton(title: "保存", target: self, action: #selector(save))
-        saveBtn.bezelStyle = .rounded
-        saveBtn.keyEquivalent = "\r"
-        saveBtn.frame = NSRect(x: W - 120, y: 16, width: 100, height: 32)
-        content.addSubview(saveBtn)
-        let cancelBtn = NSButton(title: "取消", target: self, action: #selector(cancel))
-        cancelBtn.bezelStyle = .rounded
-        cancelBtn.keyEquivalent = "\u{1b}"
-        cancelBtn.frame = NSRect(x: W - 232, y: 16, width: 100, height: 32)
-        content.addSubview(cancelBtn)
+        // 底部按钮（v0.15 即时生效后只剩「关闭」：关窗不回滚，已生效的改动保留；
+        // 不给回车等价键——回车留给文本框提交编辑）
+        let closeBtn = NSButton(title: "关闭", target: self, action: #selector(closeWindow))
+        closeBtn.bezelStyle = .rounded
+        closeBtn.frame = NSRect(x: W - 120, y: 16, width: 100, height: 32)
+        content.addSubview(closeBtn)
 
         // 底部左下角版本小字（运行时从 Info.plist 读，打包版本变了自动跟上）
         let versionLabel = NSTextField(labelWithString: AppVersion.displayString)
@@ -312,6 +327,8 @@ final class SettingsWindowController: NSObject {
     }
 
     private func loadIntoFields() {
+        isLoading = true
+        defer { isLoading = false }
         let cfg = ChannelSettings.load()
         serverField.stringValue = cfg.server
         channelField.stringValue = cfg.channel
@@ -320,27 +337,134 @@ final class SettingsWindowController: NSObject {
         }
         if let key = ChannelSettings.accessKey(for: cfg.channel), !key.isEmpty {
             keyField.stringValue = key
-            keyHint.stringValue = "本机已保存通道「\(cfg.channel)」的钥（len=\(key.count)）；清空并保存将删除它。"
         } else {
             keyField.stringValue = ""
-            keyHint.stringValue = "通道「\(cfg.channel)」的钥尚未保存；留空保存则保持未配置。"
         }
+        refreshKeyHint(channel: cfg.channel)
         proxyCheckbox.state = cfg.proxy.enabled ? .on : .off
         proxyTypePopup.selectItem(at: cfg.proxy.type == "socks" ? 1 : 0)
         proxyHostField.stringValue = cfg.proxy.host
         proxyPortField.stringValue = "\(cfg.proxy.port)"
         updateProxyControls()
-        statusLabel.stringValue = "填好后可先测试连接，再保存。"
+        statusLabel.stringValue = "所有改动即时生效：填好可直接点测试连接。"
         refreshExportState()
         refreshAssetRows()
+        appliedSnapshot = snapshotFromFields()
         PetLog.d("设置窗口已载入 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary) keyPresent=\(keyField.stringValue.isEmpty ? false : true)")
+    }
+
+    /// 钥提示行：按本机钥文件里当前通道的实际状态显示（载入与每次应用后调用）
+    private func refreshKeyHint(channel: String) {
+        if let key = ChannelSettings.accessKey(for: channel), !key.isEmpty {
+            keyHint.stringValue = "本机已保存通道「\(channel)」的钥（len=\(key.count)）；清空输入并回车/点开别处即删除它。"
+        } else {
+            keyHint.stringValue = "通道「\(channel)」的钥尚未保存；粘贴后回车或点开别处即存入本机。"
+        }
     }
 
     // MARK: - 代理小节
 
     @objc private func proxyToggled() {
         updateProxyControls()
-        PetLog.d("代理开关切换为 \(proxyCheckbox.state == .on ? "开" : "关")（保存后生效，测试连接立即按当前勾选走）")
+        guard !isLoading else { return }
+        let proxy = proxyFromFields()
+        applyFromFields(feedback: proxy.enabled ? "已生效：代理已开启（\(proxy.summary)）" : "已生效：代理已关闭")
+    }
+
+    @objc private func proxyTypeChanged() {
+        guard !isLoading else { return }
+        let proxy = proxyFromFields()
+        applyFromFields(feedback: "已生效：代理类型 \(proxy.type == "socks" ? "SOCKS5" : "HTTP")（当前\(proxy.summary)）")
+    }
+
+    @objc private func intervalChanged() {
+        guard !isLoading else { return }
+        let sec = (intervalPopup.selectedItem?.representedObject as? Int) ?? ChannelSettings.defaultInterval
+        applyFromFields(feedback: "已生效：轮询间隔 \(sec) 秒")
+    }
+
+    // MARK: - 即时生效（v0.15）
+
+    /// 文本框编辑结束（回车或失焦）即提交：落盘 + 应用 + 状态行反馈。
+    /// keyField 走同一路径（applyFromFields 内统一处理钥的存/删）。
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard !isLoading, let field = obj.object as? NSTextField else { return }
+        switch field {
+        case keyField:
+            let key = keyField.stringValue
+            applyFromFields(feedback: key.isEmpty
+                ? "已生效：accesskey 已删除（通道功能关闭）"
+                : "已生效：accesskey 已存入本机（len=\(key.count)）")
+        case serverField:
+            applyFromFields(feedback: "已生效：服务器 \(currentServerBase())")
+        case channelField:
+            applyFromFields(feedback: "已生效：通道 \(currentChannelName())")
+        case proxyHostField, proxyPortField:
+            applyFromFields(feedback: "已生效：代理 \(proxyFromFields().summary)")
+        default:
+            applyFromFields(feedback: "已生效")
+        }
+    }
+
+    /// 从当前字段组装归一化配置（与旧「保存」同一套口径：空值回默认）
+    private func configFromFields() -> ChannelConfig {
+        let server = serverField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let channel = channelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let interval = (intervalPopup.selectedItem?.representedObject as? Int) ?? ChannelSettings.defaultInterval
+        return ChannelConfig(server: server.isEmpty ? ChannelSettings.defaultServer : server,
+                             channel: channel.isEmpty ? ChannelSettings.defaultChannel : channel,
+                             intervalSec: interval,
+                             proxy: proxyFromFields())
+    }
+
+    /// 字段快照（只用于判「关窗前是否有未提交改动」，含钥原文仅在内存比对、绝不记日志）
+    private func snapshotFromFields() -> String {
+        let proxy = proxyFromFields()
+        let interval = (intervalPopup.selectedItem?.representedObject as? Int) ?? ChannelSettings.defaultInterval
+        return [serverField.stringValue, channelField.stringValue, "\(interval)",
+                "\(proxy.enabled)", proxy.type, proxy.host, "\(proxy.port)",
+                keyField.stringValue].joined(separator: "|")
+    }
+
+    /// 即时应用主入口：落盘配置、按需存/删钥、刷新从属 UI、回调重启轮询器、状态行反馈。
+    private func applyFromFields(feedback: String) {
+        let cfg = configFromFields()
+        ChannelSettings.save(cfg)
+        persistKey(for: cfg.channel)
+        refreshKeyHint(channel: cfg.channel)
+        refreshExportState()
+        appliedSnapshot = snapshotFromFields()
+        onApplied?()
+        statusLabel.stringValue = feedback
+        PetLog.d("设置即时生效：\(feedback)（server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary)）")
+    }
+
+    /// 钥落盘：与本机已存值相同则跳过（免得每次提交都重写文件刷日志）；
+    /// 字段非空且不同 → 存入当前通道；字段为空且本机有 → 删除（通道功能关闭）。
+    private func persistKey(for channel: String) {
+        let key = keyField.stringValue
+        let stored = ChannelSettings.accessKey(for: channel)
+        if key.isEmpty {
+            if stored != nil {
+                KeyFileStore.delete(channel: channel)
+                PetLog.d("即时生效：accesskey 已清空，删除通道 \(channel) 的本机钥文件")
+            }
+        } else if stored != key {
+            KeyFileStore.save(key: key, channel: channel)
+        }
+    }
+
+    @objc private func closeWindow() {
+        PetLog.d("设置窗口关闭（即时生效，无未保存改动）")
+        window?.close()
+    }
+
+    /// 关窗兜底：若有文本改动没经「编辑结束」提交（例如改完直接点窗口关闭钮），
+    /// 先自动提交一次，兑现「关窗不回滚」；无改动则直接放行不重复应用。
+    func windowWillClose(_ notification: Notification) {
+        guard !isLoading, appliedSnapshot != nil, snapshotFromFields() != appliedSnapshot else { return }
+        PetLog.d("关窗前检测到未提交的字段改动，自动即时应用一次")
+        applyFromFields(feedback: "已生效：关窗前已自动保存改动")
     }
 
     /// 未勾选时类型/主机/端口置灰
@@ -351,7 +475,7 @@ final class SettingsWindowController: NSObject {
         proxyPortField.isEnabled = on
     }
 
-    /// 从当前字段读代理配置（保存与测试连接共用，测试不必先保存）
+    /// 从当前字段读代理配置（即时应用与测试连接共用，都以界面当前值为准）
     private func proxyFromFields() -> ProxyConfig {
         let host = proxyHostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let port = Int(proxyPortField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -489,33 +613,6 @@ final class SettingsWindowController: NSObject {
         }.resume()
     }
 
-    @objc private func save() {
-        let server = serverField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let channel = channelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let interval = (intervalPopup.selectedItem?.representedObject as? Int) ?? ChannelSettings.defaultInterval
-        let cfg = ChannelConfig(server: server.isEmpty ? ChannelSettings.defaultServer : server,
-                                channel: channel.isEmpty ? ChannelSettings.defaultChannel : channel,
-                                intervalSec: interval,
-                                proxy: proxyFromFields())
-        ChannelSettings.save(cfg)
-        let key = keyField.stringValue
-        if key.isEmpty {
-            KeyFileStore.delete(channel: cfg.channel)
-            PetLog.d("设置保存：accesskey 为空，已删除通道 \(cfg.channel) 的本机钥文件（通道功能关闭）")
-        } else {
-            KeyFileStore.save(key: key, channel: cfg.channel)
-        }
-        refreshExportState()
-        onSave?()
-        window?.close()
-        PetLog.d("设置已保存并生效（轮询器将按新配置重启）")
-    }
-
-    @objc private func cancel() {
-        PetLog.d("设置窗口取消（不保存）")
-        window?.close()
-    }
-
     // MARK: - 导出 skill 包
 
     /// 当前通道名（字段为空时用默认值）与服务器基地址（字段为空时用默认、去尾斜杠）。
@@ -539,7 +636,7 @@ final class SettingsWindowController: NSObject {
         return FileManager.default.fileExists(atPath: md.path) ? dir : nil
     }
 
-    /// 刷新导出按钮可用状态：模板缺失或本机无当前通道的钥文件时禁用。窗口打开与保存后调用。
+    /// 刷新导出按钮可用状态：模板缺失或本机无当前通道的钥文件时禁用。窗口打开与每次即时应用后调用。
     private func refreshExportState() {
         guard let exportButton, let exportHint else { return }
         if skillTemplateDir() == nil {
@@ -555,7 +652,7 @@ final class SettingsWindowController: NSObject {
             PetLog.d("导出 skill 可用 channel=\(channel)（钥在本机钥文件中）")
         } else {
             exportButton.isEnabled = false
-            exportHint.stringValue = "先填入 accesskey 并保存后可导出。"
+            exportHint.stringValue = "先填入 accesskey 后可导出（填入即存入本机）。"
             PetLog.d("导出 skill 不可用：本机无通道 \(channel) 的钥文件")
         }
     }
@@ -569,7 +666,7 @@ final class SettingsWindowController: NSObject {
             return
         }
         guard let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
-            statusLabel.stringValue = "导出失败：本机没有保存通道「\(channel)」的 accesskey，请先填写并保存。"
+            statusLabel.stringValue = "导出失败：本机没有保存通道「\(channel)」的 accesskey，请先填写（回车或点开别处即存入本机）。"
             PetLog.d("skill 导出失败 channel=\(channel)：本机无钥文件")
             refreshExportState()
             return
