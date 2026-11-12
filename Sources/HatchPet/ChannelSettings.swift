@@ -1,6 +1,6 @@
 import Foundation
 
-/// 代理配置：走 UserDefaults（非敏感，不进钥匙串）。启用时 App 的会话经本机代理
+/// 代理配置：走 UserDefaults（非敏感）。启用时 App 的会话经本机代理
 /// 客户端（如 mihomo/Clash 的 127.0.0.1:7890）出海，绕开直连 TLS 被干扰的问题。
 struct ProxyConfig {
     var enabled: Bool
@@ -19,7 +19,7 @@ struct ProxyConfig {
     var summary: String { isActive ? "\(type) \(host):\(port)" : "关" }
 }
 
-/// 通道连接配置：服务器/通道名/轮询间隔/代理存 UserDefaults；accesskey 只存钥匙串。
+/// 通道连接配置：服务器/通道名/轮询间隔/代理存 UserDefaults；accesskey 存本机钥文件（见 KeyFileStore）。
 struct ChannelConfig {
     var server: String
     var channel: String
@@ -73,10 +73,10 @@ enum ChannelSettings {
         d.set(config.proxy.type, forKey: Key.proxyType)
         d.set(config.proxy.host, forKey: Key.proxyHost)
         d.set(config.proxy.port, forKey: Key.proxyPort)
-        PetLog.d("通道配置已保存 server=\(config.baseURL) channel=\(config.channel) interval=\(config.intervalSec)s proxy=\(config.proxy.summary)（钥在钥匙串，不在此处）")
+        PetLog.d("通道配置已保存 server=\(config.baseURL) channel=\(config.channel) interval=\(config.intervalSec)s proxy=\(config.proxy.summary)（钥在本机钥文件，不在此处）")
     }
 
     static func accessKey(for channel: String) -> String? {
-        KeychainStore.load(account: channel)
+        KeyFileStore.load(channel: channel)
     }
 }

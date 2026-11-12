@@ -1,8 +1,8 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// 设置窗口：通道服务器 / 通道名 / accesskey（钥匙串）/ 轮询间隔 / 代理 + 测试连接 + 导出 skill 包 + 详细说明。
-/// 服务器、通道名、间隔存 UserDefaults；accesskey 只进 macOS 钥匙串（见 KeychainStore）。
+/// 设置窗口：通道服务器 / 通道名 / accesskey（本机钥文件）/ 轮询间隔 / 代理 + 测试连接 + 导出 skill 包 + 详细说明。
+/// 服务器、通道名、间隔存 UserDefaults；accesskey 只存本机钥文件（权限 600，见 KeyFileStore），不用系统钥匙串。
 /// 保存后经 onSave 回调让 AppDelegate 立即重启轮询器生效。
 final class SettingsWindowController: NSObject {
     var onSave: (() -> Void)?
@@ -25,7 +25,7 @@ final class SettingsWindowController: NSObject {
     【每个字段是什么】
     · 服务器地址：通道服务的地址。宠物定时到这个地址读取最新状态。本应用不直连任何其他服务器。
     · 通道名：服务器上的一条通道，相当于一个专属信箱。写入方（例如你的 Muse）和这只宠物用同一个通道名对上头。
-    · accesskey：这条通道的钥匙，读写共用同一把。只保存在这台 Mac 的系统钥匙串里，不写进应用、不打包分发、不上传到任何地方（只在向上面填写的服务器请求时作为身份凭证发送）。
+    · accesskey：这条通道的钥匙，读写共用同一把。保存在本机应用数据目录的文件中（~/Library/Application Support/HatchPet/keys/<通道名>.key，目录权限 700、文件权限 600），不进系统钥匙串（避免权限弹窗），不写进应用、不打包分发、不上传到任何地方（只在向上面填写的服务器请求时作为身份凭证发送）。注：v0.5 及以前版本把钥存在系统钥匙串里，v0.6 起改存上述文件，旧钥不会自动迁移，升级后在设置里重填一次即可。
     · 轮询间隔：多久去服务器看一次新状态。越短越实时、流量越大；15 秒对桌面宠物足够，流量和耗电都可以忽略。
 
     【默认服务器是谁的】
@@ -38,7 +38,7 @@ final class SettingsWindowController: NSObject {
     默认服务器域名（*.workers.dev）在某些网络下直连会被干扰，TLS 握手直接失败。这不是钥或通道填错。办法一：在你的代理客户端（如 mihomo）里把 workers.dev 设为走代理。办法二：用本页的「代理」小节——勾选「使用代理连接服务器」，填本机代理客户端的监听地址（混合端口如 127.0.0.1:7890 选 HTTP；纯 SOCKS5 端口选 SOCKS5），保存后轮询与测试连接都会经它出海，与系统 TUN 规则互不影响。
 
     【没配置会怎样】
-    accesskey 留空（保存后即清除钥匙串记录）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
+    accesskey 留空（保存后即删除本机钥文件）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
 
     【把这条通道分享给信任的人】
     设置页下方有「导出 skill 包」：填好 accesskey 并保存后可用。导出的 zip 里装着部署 skill（对方的 Muse 装上它就能部署或对接通道）和一份 pet-channel.json（当前服务器地址、通道名与 accesskey）。拿到这个包的人可以读写你的这条通道——只发给信任的人，不要发到公开场合。
@@ -96,7 +96,7 @@ final class SettingsWindowController: NSObject {
         // accesskey
         _ = addLabel("accesskey", top: cursor)
         keyField = NSSecureTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW, height: 24))
-        keyField.placeholderString = "粘贴通道的 accesskey（只存本机钥匙串）"
+        keyField.placeholderString = "粘贴通道的 accesskey（只存本机文件）"
         content.addSubview(keyField)
         cursor -= 26
         keyHint = NSTextField(labelWithString: "")
@@ -225,10 +225,10 @@ final class SettingsWindowController: NSObject {
         }
         if let key = ChannelSettings.accessKey(for: cfg.channel), !key.isEmpty {
             keyField.stringValue = key
-            keyHint.stringValue = "钥匙串里已存有通道「\(cfg.channel)」的钥（len=\(key.count)）；清空并保存将删除它。"
+            keyHint.stringValue = "本机已保存通道「\(cfg.channel)」的钥（len=\(key.count)）；清空并保存将删除它。"
         } else {
             keyField.stringValue = ""
-            keyHint.stringValue = "钥匙串里暂无通道「\(cfg.channel)」的钥；留空保存则保持未配置。"
+            keyHint.stringValue = "通道「\(cfg.channel)」的钥尚未保存；留空保存则保持未配置。"
         }
         proxyCheckbox.state = cfg.proxy.enabled ? .on : .off
         proxyTypePopup.selectItem(at: cfg.proxy.type == "socks" ? 1 : 0)
@@ -335,10 +335,10 @@ final class SettingsWindowController: NSObject {
         ChannelSettings.save(cfg)
         let key = keyField.stringValue
         if key.isEmpty {
-            KeychainStore.delete(account: cfg.channel)
-            PetLog.d("设置保存：accesskey 为空，已清除通道 \(cfg.channel) 的钥匙串记录（通道功能关闭）")
+            KeyFileStore.delete(channel: cfg.channel)
+            PetLog.d("设置保存：accesskey 为空，已删除通道 \(cfg.channel) 的本机钥文件（通道功能关闭）")
         } else {
-            KeychainStore.save(key: key, account: cfg.channel)
+            KeyFileStore.save(key: key, channel: cfg.channel)
         }
         refreshExportState()
         onSave?()
@@ -374,7 +374,7 @@ final class SettingsWindowController: NSObject {
         return FileManager.default.fileExists(atPath: md.path) ? dir : nil
     }
 
-    /// 刷新导出按钮可用状态：模板缺失或钥匙串无当前通道的钥时禁用。窗口打开与保存后调用。
+    /// 刷新导出按钮可用状态：模板缺失或本机无当前通道的钥文件时禁用。窗口打开与保存后调用。
     private func refreshExportState() {
         guard let exportButton, let exportHint else { return }
         if skillTemplateDir() == nil {
@@ -387,11 +387,11 @@ final class SettingsWindowController: NSObject {
         if let key = ChannelSettings.accessKey(for: channel), !key.isEmpty {
             exportButton.isEnabled = true
             exportHint.stringValue = "可导出，将含通道「\(channel)」的 accesskey。"
-            PetLog.d("导出 skill 可用 channel=\(channel)（钥在钥匙串中）")
+            PetLog.d("导出 skill 可用 channel=\(channel)（钥在本机钥文件中）")
         } else {
             exportButton.isEnabled = false
             exportHint.stringValue = "先填入 accesskey 并保存后可导出。"
-            PetLog.d("导出 skill 不可用：钥匙串无通道 \(channel) 的 accesskey")
+            PetLog.d("导出 skill 不可用：本机无通道 \(channel) 的钥文件")
         }
     }
 
@@ -404,8 +404,8 @@ final class SettingsWindowController: NSObject {
             return
         }
         guard let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
-            statusLabel.stringValue = "导出失败：钥匙串里没有通道「\(channel)」的 accesskey，请先填写并保存。"
-            PetLog.d("skill 导出失败 channel=\(channel)：钥匙串无钥")
+            statusLabel.stringValue = "导出失败：本机没有保存通道「\(channel)」的 accesskey，请先填写并保存。"
+            PetLog.d("skill 导出失败 channel=\(channel)：本机无钥文件")
             refreshExportState()
             return
         }

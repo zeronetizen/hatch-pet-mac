@@ -1,10 +1,10 @@
-# Hatch 悬浮宠物 · Mac 版（v0.3：设置面板可导出 skill 包）
+# Hatch 悬浮宠物 · Mac 版（v0.6：accesskey 改存本机文件 + skill 补宠物状态协议）
 
 把 Muse 的 5 个日常状态动画做成 macOS 桌面悬浮宠物：无边框透明窗口、始终置顶、
 跨所有桌面空间，播放时用 GPU 着色器实时把视频白底抠成透明（与 Android v0.2 同方案同参数）。
 
 **v0.2 起接入通用通道（relay）**：在「设置…」里填服务器地址、通道名与 accesskey
-（钥只存 macOS 钥匙串），宠物即按间隔轮询通道状态（state / 一次性事件 / 状态消息），
+（钥存本机文件，权限 600；v0.6 起不用系统钥匙串），宠物即按间隔轮询通道状态（state / 一次性事件 / 状态消息），
 状态消息会在宠物上方冒泡显示；未配置钥时自动退回纯本地手动模式。通道服务可自建：
 仓库 `skill/relay-channel/` 是给 Muse 的一键部署 skill，装上后一句话即可在自己的
 Cloudflare 上部署一套同样的通道服务。
@@ -27,8 +27,8 @@ mac/
 │   ├── PetState.swift             5 个状态定义（idle/working/making 循环，waking/milestone 一次性）
 │   ├── ResourceLocator.swift      资源定位：先 Bundle.main，再 Bundle.module
 │   ├── StatusMenuController.swift 菜单栏图标与菜单（通道状态/最新消息/设置入口）
-│   ├── ChannelSettings.swift      通道配置（UserDefaults；钥走钥匙串）
-│   ├── KeychainStore.swift        accesskey 的钥匙串存取（Security 框架）
+│   ├── ChannelSettings.swift      通道配置（UserDefaults；钥走本机钥文件）
+│   ├── KeyFileStore.swift         accesskey 的本机文件存取（App Support/HatchPet/keys，600）
 │   ├── ChannelPoller.swift        通道轮询（since 增量、错误指数退避、睡眠暂停）
 │   ├── BubbleController.swift     状态消息气泡（宠物上方、6 秒自动消失、点击关闭）
 │   ├── SettingsWindowController.swift 设置窗口（字段/测试连接/详细说明）
@@ -91,8 +91,8 @@ mac/
   普通播放（带白底、保功能），日志里会写明失败原因；
 - **循环方式**：用「播完 seek 回 0」代替 AVPlayerLooper（looper 复制 item 后
   AVPlayerItemVideoOutput 挂载不可靠），循环接缝处可能有极短停顿，实测后评估；
-- **钥匙串与真机未验**：v0.2 的钥匙串读写、设置窗口、气泡与变暗效果均待 Mac 实测；
-- 未做：开机自启、图标文件；通道长轮询（协议已留 since/seq，后续可加）。
+- **真机未验**：设置窗口、气泡、变暗效果与 v0.6 的钥文件读写均待 Mac 实测；
+- 未做：开机自启；通道长轮询（协议已留 since/seq，后续可加）。
 
 ## v0.2 新增验收点
 
@@ -118,3 +118,22 @@ mac/
 - [ ] 设置里填好钥并保存后，「导出 skill 包…」按钮变可点；未填钥时禁用且有小字说明
 - [ ] 导出后解压 zip：relay-channel-setup/ 下有 SKILL.md、assets/ 四件与 pet-channel.json（内容为当前服务器/通道/钥）
 - [ ] 换一台 Mac 或另一个 Muse 装这个包，能按 SKILL.md 说明读到该通道状态
+
+## v0.6 新增
+
+- **accesskey 改存本机文件，彻底不用系统钥匙串**：钥匙串在 ad-hoc 签名应用上
+  会弹权限提示，自用场景没必要。改为 `KeyFileStore`：钥存
+  `~/Library/Application Support/HatchPet/keys/<通道名>.key`（目录 700、文件 600，
+  读时 trim），代码里零 Security 框架调用。**不做旧钥迁移**：v0.5 及以前存进
+  钥匙串的钥在 v0.6 视为未保存，升级后在设置里重填一次即可；设置说明与
+  「导出 skill」按钮的可用性判定都改查钥文件。
+- **随仓 skill 补「宠物状态协议」章节**：`skill/relay-channel/SKILL.md` 新增
+  一节，定版 HatchPet 的状态写入协议——state 词表（idle/working/making，
+  sleeping 不写）、一次性 event（waking/milestone）、message 冒泡规矩、
+  写时机 hook 对照表、节流与心跳。装上 skill 的 Muse 照此节即可正确驱动宠物。
+
+## v0.6 新增验收点
+
+- [ ] 升级后设置里钥显示「尚未保存」，重填并保存后轮询恢复、导出按钮变可点，全程无钥匙串权限弹窗
+- [ ] `~/Library/Application Support/HatchPet/keys/hatch-pet.key` 存在，目录权限 700、文件 600
+- [ ] 按 SKILL.md「宠物状态协议」用 relay.mjs 写 milestone + message，宠物播庆祝并冒泡摘要

@@ -3,7 +3,8 @@ import AppKit
 /// 应用装配：日志 → 资源体检 → 渲染器 → 悬浮窗 → 状态机 → 菜单栏 → 通道轮询
 /// → 气泡 → 设置窗口 → 系统事件。
 /// 持久化（UserDefaults）：窗口位置（原点）、尺寸、触摸穿透开关、通道配置
-/// （服务器/通道名/间隔，见 ChannelSettings）；accesskey 只存钥匙串。
+/// （服务器/通道名/间隔，见 ChannelSettings）；accesskey 存本机钥文件
+/// （~/Library/Application Support/HatchPet/keys/，600，见 KeyFileStore）。
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: PetPanel!
     private var renderer: PetVideoRenderer!
