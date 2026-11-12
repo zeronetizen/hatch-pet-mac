@@ -2,3 +2,7 @@
 *.app/
 HatchPet-mac.zip
 .DS_Store
+
+# 绝不入库：任何钥文件
+keys/
+*.key
