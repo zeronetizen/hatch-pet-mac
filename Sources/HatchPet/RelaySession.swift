@@ -1,8 +1,8 @@
 import Foundation
 
 /// URLSession 工厂：轮询器与「测试连接」共用。代理启用时给 configuration 设
-/// connectionProxyDictionary，让请求经本机代理客户端出海（直连 *.workers.dev
-/// 的 TLS 握手在本机网络下会被干扰，代理可绕开）。
+/// connectionProxyDictionary，让请求经本机代理客户端出海（直连服务器域名
+/// 的 TLS 握手在某些网络下会被干扰，代理可绕开）。
 /// 字典键即 CFNetwork 的 kCFNetworkProxies* 常量对应的字符串值：
 /// HTTPEnable/HTTPProxy/HTTPPort、HTTPSEnable/HTTPSProxy/HTTPSPort、
 /// SOCKSEnable/SOCKSProxy/SOCKSPort。

@@ -35,8 +35,8 @@ struct ChannelConfig {
 }
 
 enum ChannelSettings {
-    static let defaultServer = "https://relay.nonzero-e3c.workers.dev"
-    static let defaultChannel = "hatch-pet"
+    static let defaultServer = "https://pet.8529527.xyz"
+    static let defaultChannel = ""
     static let defaultInterval = 15
     static let intervalChoices = [5, 10, 15, 30]
 

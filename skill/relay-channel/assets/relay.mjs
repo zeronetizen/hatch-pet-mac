@@ -7,7 +7,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const BASE = (process.env.RELAY_URL || "https://relay.nonzero-e3c.workers.dev").replace(/\/$/, "");
+const BASE = (process.env.RELAY_URL || "").replace(/\/$/, "");
+if (!BASE) { console.error("先设 RELAY_URL 环境变量为你的通道服务器地址（自部署的地址，或 pet-channel.json 里的 server）"); process.exit(1); }
 const KEYS = join(HERE, "keys");
 
 function channelKey(name) {
