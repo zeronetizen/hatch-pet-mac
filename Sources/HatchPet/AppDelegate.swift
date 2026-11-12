@@ -16,7 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var distributedObservers: [NSObjectProtocol] = []
     private var staleTimer: Timer?
-    private var dimmed = false
+    /// 失联变暗相位（v0.12 起改为渐进变暗，见下方实现）：是否已进入变暗 +
+    /// 当前已应用的窗口 alpha；目标 alpha 由数据年龄的连续函数算出。
+    private var dimPhase = false
+    private var currentAlpha: CGFloat = 1.0
 
     private enum DefaultsKey {
         static let size = "pet.size"
@@ -143,39 +146,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.menuController.latestMessage = (text: message, at: at)
                 self.bubble.show(message: message, anchor: self.panel)
             }
+            // 新数据到达即复查失联变暗：正在变暗/已变暗时不等下个 tick，立即平滑恢复
+            self.checkStaleness()
         }
     }
 
-    // MARK: - 失联变暗（通道数据时间戳超 5 分钟 -> alpha 0.55，恢复新鲜还原）
+    // MARK: - 失联渐进变暗（v0.12）
+
+    // v0.11 及以前：数据超 5 分钟一步跳到 alpha 0.55。回合制写入节奏下 5 分钟
+    // 太短、频繁触发，且一步跳变在真机上就是「突然透明」（用户原话）。
+    // v0.12 改为：阈值放宽到 20 分钟；越过阈值后用 60 秒线性渐变到 0.75 封底；
+    // 收到新数据立即平滑恢复到 1（约 0.3 秒）。目标 alpha 是数据年龄的连续函数，
+    // 定时 tick 只负责把当前 alpha 朝目标推进，其中下行速率另行封顶保证匀速。
+    private static let staleThreshold: TimeInterval = 20 * 60      // 1200s
+    private static let staleTick: TimeInterval = 2                 // tick 间隔（s）
+    private static let dimFloor: CGFloat = 0.75
+    private static let dimFadeSeconds: TimeInterval = 60
 
     private func startStaleTimer() {
-        staleTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+        staleTimer = Timer.scheduledTimer(withTimeInterval: Self.staleTick, repeats: true) { [weak self] _ in
             self?.checkStaleness()
         }
-        PetLog.d("失联变暗检查定时器已启动（每 20s，阈值 300s）")
+        PetLog.d("失联变暗检查定时器已启动（每 \(Int(Self.staleTick))s，阈值 \(Int(Self.staleThreshold))s，\(Int(Self.dimFadeSeconds))s 渐变至 \(Self.dimFloor)）")
+    }
+
+    /// 目标 alpha（连续函数）：年龄 ≤ 阈值 → 1；其后 60 秒内线性降到 0.75 封底。
+    /// 轮询未启用（本地手动模式）或还没拿到过任何数据 → 恒为 1（不变暗）。
+    private func targetAlpha(age: TimeInterval?) -> CGFloat {
+        guard poller.enabled, let age else { return 1 }
+        if age <= Self.staleThreshold { return 1 }
+        let t = min(1, (age - Self.staleThreshold) / Self.dimFadeSeconds)
+        return 1 - (1 - Self.dimFloor) * CGFloat(t)
     }
 
     private func checkStaleness() {
-        // 本地手动模式（轮询未启用）不应用此规则
-        guard poller.enabled else {
-            if dimmed { setDimmed(false, reason: "轮询未启用") }
-            return
+        let age: TimeInterval?
+        if poller.enabled, let tsMs = poller.latestDataTsMs {
+            age = Date().timeIntervalSince1970 - tsMs / 1000
+        } else {
+            age = nil
         }
-        guard let tsMs = poller.latestDataTsMs else {
-            // 还没拿到过任何数据：不变暗
-            return
+        let target = targetAlpha(age: age)
+        // 进入 / 退出变暗各记一条（带数据年龄秒数）
+        if let age, age > Self.staleThreshold, !dimPhase {
+            dimPhase = true
+            PetLog.d("进入失联变暗 数据年龄=\(Int(age))s（阈值 \(Int(Self.staleThreshold))s，将在 \(Int(Self.dimFadeSeconds))s 内渐变至 \(Self.dimFloor)）")
+        } else if dimPhase, target >= 1 {
+            dimPhase = false
+            let ageText = age.map { "\(Int($0))s" } ?? "无（轮询未启用/尚无数据）"
+            PetLog.d("退出失联变暗 数据年龄=\(ageText)，平滑还原 alpha=1")
         }
-        let age = Date().timeIntervalSince1970 - tsMs / 1000
-        let stale = age > 300
-        if stale != dimmed {
-            setDimmed(stale, reason: stale ? "数据已 \(Int(age))s 未更新（ts=\(Int(tsMs))）" : "数据已恢复新鲜（age=\(Int(age))s）")
-        }
+        applyAlpha(target: target)
     }
 
-    private func setDimmed(_ on: Bool, reason: String) {
-        dimmed = on
-        panel.alphaValue = on ? 0.55 : 1.0
-        PetLog.d("失联变暗 \(on ? "开启" : "关闭") alpha=\(on ? 0.55 : 1.0) 原因：\(reason)")
+    private func applyAlpha(target: CGFloat) {
+        if target > currentAlpha {
+            // 恢复方向：立即平滑还原到 1（约 0.3 秒动画），不等 tick 慢慢爬
+            currentAlpha = target
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.3
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().alphaValue = target
+            }
+        } else if target < currentAlpha {
+            // 变暗方向：下行速率按 tick 封顶（每 tick 最多走完 (tick/60) 的全程），
+            // 保证 60 秒匀速渐变，不因年龄跳变而一步到位
+            let maxStep = (1 - Self.dimFloor) * CGFloat(Self.staleTick / Self.dimFadeSeconds)
+            let next = max(target, currentAlpha - maxStep)
+            currentAlpha = next
+            panel.alphaValue = next
+        }
     }
 
     // MARK: - 窗口位置/尺寸/穿透/显隐

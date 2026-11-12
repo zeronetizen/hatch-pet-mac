@@ -1,4 +1,4 @@
-# Hatch 悬浮宠物 · Mac 版（v0.11：云形修匀 + 按状态自定义形象 + GitHub 自助更新）
+# Hatch 悬浮宠物 · Mac 版（v0.12：云形样条重画 + 失联渐进变暗 + 菜单栏头像图标）
 
 把 Muse 的 5 个日常状态动画做成 macOS 桌面悬浮宠物：无边框透明窗口、始终置顶、
 跨所有桌面空间，播放时用 GPU 着色器实时把视频白底抠成透明（与 Android v0.2 同方案同参数）。
@@ -33,7 +33,7 @@ mac/
 │   ├── BubbleController.swift     状态消息气泡（宠物上方、6 秒自动消失、点击关闭）
 │   ├── SettingsWindowController.swift 设置窗口（字段/测试连接/详细说明）
 │   ├── PetLog.swift               全量日志（~/Library/Logs/HatchPet.log + NSLog）
-│   └── Resources/                 5 个原始 mp4（480×480 H.264，未重编码）
+│   └── Resources/                 5 个原始 mp4（480×480 H.264，未重编码）+ status-icon{,@2x}.png（菜单栏头像，副本）
 ├── Packaging/Info.plist           LSUIElement、com.nonzero.hatchpet.mac、最低系统 13.0
 ├── assemble_app.sh                swift build universal → 组装 .app → ad-hoc 签名 → zip
 └── .github/workflows/build.yml    push main / 手动触发 → macos-latest 构建 → artifact
@@ -53,7 +53,7 @@ mac/
 1. 解压 `HatchPet-mac.zip` 得到 `HatchPet.app`，拖到「应用程序」或任意位置；
 2. 首次打开会被 Gatekeeper 拦（ad-hoc 签名、自用未公证）：**右键点 App → 打开 → 再点「打开」**；
    或终端执行 `xattr -dr com.apple.quarantine /path/to/HatchPet.app` 后再双击；
-3. 启动后宠物出现在主屏右下偏上，菜单栏出现爪印图标；没有 Dock 图标是正常的（LSUIElement）。
+3. 启动后宠物出现在主屏右下偏上，菜单栏出现 Muse 头像图标（v0.12 起，此前是爪印）；没有 Dock 图标是正常的（LSUIElement）。
 
 ## 操作
 
@@ -220,3 +220,35 @@ mac/
 - [ ] 选一个损坏/非视频文件替换形象，应提示失败且原形象不变
 - [ ] 设置「关于 / 更新」点检查更新：v0.11 刚发布时应显示已是最新；待有更高版本 Release 后应弹窗并能一键更新重启到新版
 - [ ] 更新全程断网/关代理重试，应弹窗失败且旧版照常可用
+
+## v0.12 新增
+
+- **思想云重画（wave=v3）**（针对 v0.11 真机反馈：圆并集的云边缘在小尺寸下
+  是一颗颗独立疙瘩、「全身起肿物」）：废弃「核心椭圆 + 12 个凸起圆并集 +
+  垫底描边」，改用**一条闭合平滑样条**（Catmull-Rom→贝塞尔）一次成形——
+  在核心椭圆上取 12 个控制点，半径只做低频调制（sin(2θ)/sin(3θ)，总振幅
+  ≤ 6%，相位写死），整朵云只有 2–3 处大而缓的起伏；底部点调制减半保持
+  下沿相对平齐。单路径可直接 stroke 描边（0.75pt separatorColor）、填充
+  controlBackgroundColor，不再有垫底近似。圆点引线（5/3.5pt、间隙、朝向
+  镜像）、文字安全区（200 宽、3 行，留白微增到 34/28 抵消样条最凹处）、
+  日志 shape=cloud（加 wave=v3 标记）不变。
+- **失联变暗改渐进**（针对真机反馈「会突然透明」）：v0.11 及以前是数据超
+  5 分钟一步跳到 alpha 0.55，回合制写入节奏下频繁触发且突兀。v0.12 改为
+  目标 alpha 是数据年龄的连续函数：阈值放宽到 **20 分钟**，越过后 **60 秒
+  内线性渐变到 0.75** 封底（tick 2 秒、下行速率封顶保证匀速）；收到新数据
+  立即复查并**平滑恢复到 1（约 0.3 秒）**。进入/退出变暗各记一条日志（带
+  数据年龄秒数）；设置说明同步新增「长时间没新状态会变淡」一段。
+- **菜单栏图标换 Muse 本人**（针对真机反馈：爪印 SF Symbol 像百度 logo）：
+  改用 idle 形象图——`Packaging/status-icon.png`（36×36）与
+  `status-icon@2x.png`（72×72），由 `~/assets/avatar/reference/hatch.jpg`
+  头部裁切生成（裁切框 27%–73% × 3%–49%），assemble 时平铺进
+  Contents/Resources，SwiftPM 资源里另有副本作 Bundle.module 回退；
+  StatusMenuController 把两档拼成一个 NSImage（显示 18pt、按比例缩放），
+  **彩色、非模板图**（奶油色角色设模板会被染成黑坨）；资源缺失时才回退爪印。
+
+## v0.12 新增验收点
+
+- [ ] 气泡云团边缘光滑、无离散疙瘩，描边均匀；长短消息下云形都自然
+- [ ] 通道停写后宠物保持全亮至少 20 分钟；其后一分钟内缓慢变淡到约 75%，无跳变感；恢复写入后立刻平滑变回全亮
+- [ ] 菜单栏图标是 Muse 头像（彩色、脸部清晰），深色/浅色菜单栏下都可辨认
+- [ ] **自助更新首验**：v0.11 里点「检查更新」应发现 v0.12 并能一键更新重启到 v0.12（设置底部版本行显示 HatchPet v0.12 (build 12)）

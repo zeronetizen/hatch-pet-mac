@@ -33,6 +33,14 @@ rm -rf "${APP}/Contents/Resources/skill/relay-channel"
 cp -R skill/relay-channel "${APP}/Contents/Resources/skill/"
 test -f "${APP}/Contents/Resources/skill/relay-channel/SKILL.md"
 
+# 3.55) 菜单栏图标：Packaging/status-icon{,@2x}.png 平铺进 Contents/Resources
+# （Muse idle 形象头部裁切，源图 ~/assets/avatar/reference/hatch.jpg；
+# 代码 StatusMenuController 先查 Bundle.main，这两份 PNG 与视频同策略平铺）
+cp Packaging/status-icon.png "${APP}/Contents/Resources/status-icon.png"
+cp "Packaging/status-icon@2x.png" "${APP}/Contents/Resources/status-icon@2x.png"
+test -s "${APP}/Contents/Resources/status-icon.png"
+test -s "${APP}/Contents/Resources/status-icon@2x.png"
+
 # 3.6) 应用图标：Packaging/icon-1024.png → iconset（sips）→ AppIcon.icns（iconutil）
 ICON_SRC="Packaging/icon-1024.png"
 test -f "${ICON_SRC}"

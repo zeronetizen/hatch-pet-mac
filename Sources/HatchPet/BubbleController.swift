@@ -1,25 +1,18 @@
 import AppKit
 
-/// 气泡内容视图：「思想云」轮廓（v0.10 起，用户在三方案示意图里选了 C）——
-/// 云团主体（核心椭圆 + 一圈固定图案的凸起圆叠成的并集）+ 下方两个递减圆点引线。
-/// AppKit 路径没有并集运算，做法：
-/// - 填充：把核心椭圆与每个凸起圆作为同向子路径叠进一条 NSBezierPath，
-///   用默认的非零缠绕（non-zero）填充，叠加区域自然成并集，不留内部线；
-/// - 描边：不能直接 stroke（会把每个圆的整圈都画出来）。改为先画一份同形、
-///   处处向外扩 1.0pt 的垫底（椭圆半轴 +1、每个圆半径 +1，近似等距偏移），
-///   垫底露出的 1.0pt 圈即视觉描边；圆点引线同理（先画 r+1 垫底再画本体）。
-///   v0.11：垫底由 1.5 降到 1.0，凹口处描边显粗的问题随之减轻（等距偏移在凹口
-///   必然略粗，属此法的固有近似，1.0pt 下已不明显）。
-/// 云团与圆点的几何（核心椭圆、各圆圆心/半径，均在本视图坐标系内）由
-/// BubbleController 按「正常朝向」（云在上、圆点在下）算好后下发；面板被迫贴到
-/// 宠物下方时控制器把全部 y 坐标镜像后再下发，本视图不感知朝向。
+/// 气泡内容视图：「思想云」轮廓（v0.10 起，用户在三方案示意图里选了 C）+ 下方
+/// 两个递减圆点引线。云形画法在 v0.12 换代（wave=v3）：
+/// - v0.10/v0.11：核心椭圆 + 12 个离散圆凸起的并集——真机小尺寸下每个凸起都
+///   是一颗独立疙瘩，用户原话「全身起肿物」，且并集不能直接描边、只能垫底近似。
+/// - v0.12：一条闭合平滑样条（Catmull-Rom→贝塞尔）一次成形——在核心椭圆上取
+///   12 个控制点，半径只做低频调制（sin(2θ)/sin(3θ)，总振幅 ≤6%），整朵云只有
+///   2–3 处大而缓的起伏；单路径可直接 stroke 描边（0.75pt），不再需要垫底法。
+/// 云形路径（视图坐标）与圆点几何由 BubbleController 按「正常朝向」（云在上、
+/// 圆点在下）算好下发；面板被迫贴到宠物下方时控制器把路径整体 y 镜像后下发，
+/// 本视图不感知朝向。
 /// 点击回调（用于立即关闭气泡）。
 private final class BubbleView: NSView {
-    /// 描边垫底向外扩的距离（pt），即视觉描边粗细。v0.11 由 1.5 收窄到 1.0。
-    static let outlinePad: CGFloat = 1.0
-
-    var coreEllipse: NSRect = .zero
-    var bumps: [(center: NSPoint, radius: CGFloat)] = []
+    var cloudPath: NSBezierPath?
     var dots: [(center: NSPoint, radius: CGFloat)] = []
     var onClick: (() -> Void)?
     override func mouseDown(with event: NSEvent) { onClick?() }
@@ -31,75 +24,46 @@ private final class BubbleView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        // 垫底描边层（同形外扩）→ 本体填充层
-        cloudPath(expand: Self.outlinePad).fill(with: NSColor.separatorColor)
-        cloudPath(expand: 0).fill(with: NSColor.controlBackgroundColor)
-        for dot in dots {
-            dotPath(dot, expand: Self.outlinePad).fill(with: NSColor.separatorColor)
+        if let cloudPath {
+            NSColor.controlBackgroundColor.setFill()
+            cloudPath.fill()
+            NSColor.separatorColor.setStroke()
+            cloudPath.lineWidth = 0.75
+            cloudPath.stroke()
         }
         for dot in dots {
-            dotPath(dot, expand: 0).fill(with: NSColor.controlBackgroundColor)
+            let r = dot.radius
+            let p = NSBezierPath(ovalIn: NSRect(x: dot.center.x - r, y: dot.center.y - r,
+                                                width: r * 2, height: r * 2))
+            NSColor.controlBackgroundColor.setFill()
+            p.fill()
+            NSColor.separatorColor.setStroke()
+            p.lineWidth = 0.75
+            p.stroke()
         }
-    }
-
-    /// 云团并集路径：核心椭圆 + 每个凸起圆各作一条子路径叠入同一路径，
-    /// 非零缠绕填充即并集。expand>0 时椭圆半轴与各圆半径同步外扩（垫底描边用）。
-    private func cloudPath(expand: CGFloat) -> NSBezierPath {
-        let path = NSBezierPath()
-        path.append(NSBezierPath(ovalIn: coreEllipse.insetBy(dx: -expand, dy: -expand)))
-        for bump in bumps {
-            let r = bump.radius + expand
-            path.append(NSBezierPath(ovalIn: NSRect(x: bump.center.x - r, y: bump.center.y - r,
-                                                    width: r * 2, height: r * 2)))
-        }
-        return path
-    }
-
-    private func dotPath(_ dot: (center: NSPoint, radius: CGFloat), expand: CGFloat) -> NSBezierPath {
-        let r = dot.radius + expand
-        return NSBezierPath(ovalIn: NSRect(x: dot.center.x - r, y: dot.center.y - r,
-                                           width: r * 2, height: r * 2))
-    }
-}
-
-/// NSBezierPath 填充便捷方法（指定颜色填充一次）。
-private extension NSBezierPath {
-    func fill(with color: NSColor) {
-        color.setFill()
-        fill()
     }
 }
 
 /// 状态消息气泡：贴宠物窗口上方居中的独立小面板（不占宠物窗、不被其边界裁剪），
-/// 形态为思想云（v0.10 起：云团轮廓 + 圆点引线，圆点串下端指向宠物头顶）；
+/// 形态为思想云（云团轮廓 + 圆点引线，圆点串下端指向宠物头顶）；
 /// 文本多行折行（内容最大宽 200、最多 3 行、尾部省略号），按行数 6/8/10 秒自动消失、点击立即消失。
 /// 宠物拖动结束/尺寸变化时由 AppDelegate 调 repositionIfVisible 跟随。
 final class BubbleController {
     /// 文字安全区最大宽（pt）：云团内圈不规则，文字只放中心安全区，故从旧版 220 收到 200。
     private static let maxContentWidth: CGFloat = 200
     private static let maxLines = 3
-    /// 核心椭圆相对文字的留白：半轴 = 文字半宽 + 30 / 文字半高 + 24，
-    /// 保证文字矩形（含四角）始终落在核心椭圆内、不压凸起的凹口。
-    private static let corePadX: CGFloat = 30
-    private static let corePadY: CGFloat = 24
-    /// 凸起图案（角度°, 半径系数）：固定数组保证云形稳定、不随机；角度按数学
-    /// 方向（90° 为正上方），每 30° 一个、底部三个（240/270/300）正对下方。
-    /// v0.11 修匀：旧版半径 19–27 落差过大，且底部凸起圆心都在椭圆周上、
-    /// 下沿参差（左下曾出现单个凸起明显下垂像要滴下来）。新版半径改用相对
-    /// bumpBaseRadius 的系数（0.95–1.13，方差收窄），底部一排再做下沿对齐
-    /// （见 makeLayout），左右两端（0°/180°）系数取中值避免过尖。
-    private static let bumpAngles: [CGFloat] = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
-    private static let bumpBaseRadius: CGFloat = 24
-    private static let bumpFactors: [CGFloat] = [1.00, 1.08, 1.13, 1.05, 1.12, 0.97,
-                                                 1.08, 1.00, 1.12, 1.05, 1.10, 0.95]
+    /// 核心椭圆相对文字的留白：半轴 = 文字半宽 + 34 / 文字半高 + 28。
+    /// v0.12 样条相对核心椭圆有 ≤6% 的低频起伏（最凹处向内约 6%），
+    /// 留白比 v0.10/v0.11 的 30/24 略放大，保证文字四角始终在云内。
+    private static let corePadX: CGFloat = 34
+    private static let corePadY: CGFloat = 28
     /// 圆点串占高：云下间隙 6 + 大圆直径 10 + 间隙 5 + 小圆直径 7 + 底部余量 2 = 30。
     private static let dotsZoneHeight: CGFloat = 30
 
     /// 一次 show 的布局（全部按正常朝向：云在上、圆点在下；坐标为视图坐标系）。
     private struct Layout {
         var panelSize: NSSize
-        var coreEllipse: NSRect
-        var bumps: [(center: NSPoint, radius: CGFloat)]
+        var cloudPath: NSBezierPath
         var dots: [(center: NSPoint, radius: CGFloat)]
         var labelFrame: NSRect
     }
@@ -149,7 +113,7 @@ final class BubbleController {
         }
         // 显示时长随行数：1 行 6 秒 / 2 行 8 秒 / 3 行 10 秒
         let duration: TimeInterval = lines <= 1 ? 6.0 : (lines == 2 ? 8.0 : 10.0)
-        PetLog.d("气泡显示 shape=cloud lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
+        PetLog.d("气泡显示 shape=cloud wave=v3 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
         hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             self?.hide(reason: "到时自动（\(Int(duration)) 秒）")
@@ -174,37 +138,58 @@ final class BubbleController {
 
     // MARK: - 布局
 
-    /// 按文字尺寸算云团布局（正常朝向）。云团尺寸由核心椭圆 + 最大凸起决定：
-    /// 半宽 = 核心半轴 a + 缩放后最大凸起半径，两侧各留 3pt 给垫底描边与抗锯齿。
+    /// 云轮廓控制点（原点为云中心）：核心椭圆每 30° 一个、共 12 个；半径做
+    /// 低频调制 m = 1 + 0.035·sin(2θ+0.9) + 0.025·sin(3θ+2.2)，总振幅 ≤ 6%，
+    /// 相位写死保证形状稳定。整圈只有 2–3 处大而缓的起伏，不出现离散疙瘩。
+    /// 底部点（sinθ ≤ -0.7）的调制减半，下沿保持相对平齐。
+    private static func cloudControlPoints(a: CGFloat, b: CGFloat) -> [NSPoint] {
+        var pts: [NSPoint] = []
+        for i in 0..<12 {
+            let t = CGFloat(i) * .pi / 6
+            var m: CGFloat = 1 + 0.035 * sin(2 * t + 0.9) + 0.025 * sin(3 * t + 2.2)
+            if sin(t) <= -0.7 { m = 1 + (m - 1) * 0.5 }
+            pts.append(NSPoint(x: a * cos(t) * m, y: b * sin(t) * m))
+        }
+        return pts
+    }
+
+    /// Catmull-Rom 闭合样条 → 三次贝塞尔：曲线过全部控制点、无尖角，一次成形。
+    private static func closedSplinePath(through pts: [NSPoint]) -> NSBezierPath {
+        let n = pts.count
+        let path = NSBezierPath()
+        guard n >= 3 else { return path }
+        path.move(to: pts[0])
+        for i in 0..<n {
+            let p0 = pts[(i + n - 1) % n]
+            let p1 = pts[i]
+            let p2 = pts[(i + 1) % n]
+            let p3 = pts[(i + 2) % n]
+            let c1 = NSPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+            let c2 = NSPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            path.curve(to: p2, controlPoint1: c1, controlPoint2: c2)
+        }
+        path.close()
+        return path
+    }
+
+    /// 按文字尺寸算云团布局（正常朝向）。面板尺寸由样条路径的外包围盒 + 四周
+    /// 4pt 余量（描边与抗锯齿）决定；云占面板上部，圆点串占底部 dotsZoneHeight。
     private static func makeLayout(contentW: CGFloat, contentH: CGFloat) -> Layout {
         let a = contentW / 2 + corePadX          // 核心椭圆半轴
         let b = contentH / 2 + corePadY
-        // 凸起缩放：以核心尺寸为参照，云越小凸起越收敛（下限 0.6），保证形状比例稳定
-        let scale = min(1, max(0.6, min(2 * a, 2 * b * 2.2) / 300))
-        let rBase = bumpBaseRadius * scale
-        let radii = bumpFactors.map { $0 * rBase }
-        let rMax = radii.max() ?? 0
-        let cloudW = 2 * (a + rMax) + 6
-        let cloudH = 2 * (b + rMax) + 6
+        let path = closedSplinePath(through: cloudControlPoints(a: a, b: b))
+        let bounds = path.bounds
+        let margin: CGFloat = 8
+        let cloudW = bounds.width + margin
+        let cloudH = bounds.height + margin
         let panelSize = NSSize(width: cloudW, height: cloudH + dotsZoneHeight)
-        // 正常朝向：云团占面板上部，圆点串占底部 dotsZoneHeight
-        let center = NSPoint(x: cloudW / 2, y: dotsZoneHeight + cloudH / 2)
-        let core = NSRect(x: center.x - a, y: center.y - b, width: 2 * a, height: 2 * b)
-        var bumps: [(center: NSPoint, radius: CGFloat)] = []
-        for (i, deg) in bumpAngles.enumerated() {
-            let t = deg * .pi / 180
-            var cy = center.y + b * sin(t)
-            // 底部一排（sin ≤ -0.8，即 240°/270°/300°）下沿对齐：把圆心 y 改到
-            // 「圆心 - 半径 = -(b + rBase)」，三者的底边落在同一条线上，谁也不
-            // 单独下垂。对齐量仅由半径差决定（≤ ±0.13·rBase ≈ ±3pt），凸起与
-            // 核心椭圆仍大幅重叠、并集不断裂。两侧下角（210°/330°）不参与对齐，
-            // 保持云团下角自然上收的弧度。
-            if sin(t) <= -0.8 {
-                cy = center.y - (b + rBase) + radii[i]
-            }
-            bumps.append((center: NSPoint(x: center.x + a * cos(t), y: cy),
-                          radius: radii[i]))
-        }
+        // 把云形从「原点在云中心」的坐标系平移到视图坐标系
+        let dx = -bounds.minX + margin / 2
+        let dy = dotsZoneHeight - bounds.minY + margin / 2
+        let shift = NSAffineTransform()
+        shift.translateX(by: dx, yBy: dy)
+        path.transform(using: shift)
+        let center = NSPoint(x: bounds.midX + dx, y: bounds.midY + dy)
         // 圆点串：自云团下沿向下，半径 5 → 3.5 递减，略向左（宠物头顶方向）漂移
         let dots: [(center: NSPoint, radius: CGFloat)] = [
             (center: NSPoint(x: center.x - 5, y: dotsZoneHeight - 11), radius: 5),
@@ -212,12 +197,12 @@ final class BubbleController {
         ]
         let labelFrame = NSRect(x: center.x - contentW / 2, y: center.y - contentH / 2,
                                 width: contentW, height: contentH)
-        return Layout(panelSize: panelSize, coreEllipse: core, bumps: bumps,
+        return Layout(panelSize: panelSize, cloudPath: path,
                       dots: dots, labelFrame: labelFrame)
     }
 
-    /// 把布局下发到视图与标签；flipped 时全部 y 坐标关于面板高度镜像
-    /// （云落到面板下部、圆点串在云上方，思想泡上下关系仍成立）。
+    /// 把布局下发到视图与标签；flipped 时云路径整体关于面板高度镜像、圆点与
+    /// 标签同样镜像（云落到面板下部、圆点串在云上方，思想泡上下关系仍成立）。
     private func applyLayout(_ layout: Layout, flipped: Bool,
                              to view: BubbleView, label: NSTextField) {
         let h = layout.panelSize.height
@@ -227,8 +212,17 @@ final class BubbleController {
         func flipPoint(_ p: NSPoint) -> NSPoint {
             flipped ? NSPoint(x: p.x, y: h - p.y) : p
         }
-        view.coreEllipse = flipRect(layout.coreEllipse)
-        view.bumps = layout.bumps.map { (center: flipPoint($0.center), radius: $0.radius) }
+        if flipped {
+            // (x, y) -> (x, h - y)，用显式矩阵避免拼接顺序歧义；
+            // 作用在布局路径的副本上，不污染原始布局。
+            let flip = NSAffineTransform(transform: NSAffineTransformStruct(
+                m11: 1, m12: 0, m21: 0, m22: -1, tX: 0, tY: h))
+            let p = layout.cloudPath.copy() as! NSBezierPath
+            p.transform(using: flip)
+            view.cloudPath = p
+        } else {
+            view.cloudPath = layout.cloudPath
+        }
         view.dots = layout.dots.map { (center: flipPoint($0.center), radius: $0.radius) }
         view.needsDisplay = true
         label.frame = flipRect(layout.labelFrame)

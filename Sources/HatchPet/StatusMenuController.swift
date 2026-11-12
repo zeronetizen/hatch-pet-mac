@@ -37,15 +37,44 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "pawprint.fill",
-                                   accessibilityDescription: "HatchPet")
-            button.image?.isTemplate = true
+            // v0.12：菜单栏图标改用 Muse 自己的 idle 形象图（头部裁切、彩色），
+            // 不再用爪印 SF Symbol（真机反馈像百度 logo）。角色是奶油色，
+            // 绝不能设 isTemplate（模板图会被系统染成单色黑坨）。
+            if let icon = Self.statusIconImage() {
+                button.image = icon
+                button.imageScaling = .scaleProportionallyDown
+                PetLog.d("菜单栏图标已设为 idle 形象图（status-icon，彩色非模板）")
+            } else {
+                button.image = NSImage(systemSymbolName: "pawprint.fill",
+                                       accessibilityDescription: "HatchPet")
+                button.image?.isTemplate = true
+                PetLog.d("菜单栏图标资源缺失，回退爪印 SF Symbol")
+            }
             button.toolTip = "Hatch 悬浮宠物"
         }
         buildMenu()
         menu.delegate = self
         statusItem.menu = menu
         PetLog.d("菜单栏图标与菜单已创建（含通道状态/最新消息/设置入口）")
+    }
+
+    /// 状态栏图标：Packaging/status-icon.png（36×36）+ status-icon@2x.png（72×72），
+    /// 由 ~/assets/avatar/reference/hatch.jpg 头部裁切生成（见 Packaging 同名文件），
+    /// assemble_app.sh 将其平铺进 Contents/Resources（Bundle.main），
+    /// SwiftPM 资源里各有一份副本（Bundle.module 回退，与视频同策略）。
+    /// 两档像素拼进同一 NSImage 的两个表征，系统按屏幕倍率自选；显示尺寸 18pt。
+    private static func statusIconImage() -> NSImage? {
+        func url(_ name: String) -> URL? {
+            Bundle.main.url(forResource: name, withExtension: "png")
+                ?? Bundle.module.url(forResource: name, withExtension: "png")
+        }
+        guard let u1 = url("status-icon"), let u2 = url("status-icon@2x"),
+              let r1 = NSImageRep(contentsOf: u1), let r2 = NSImageRep(contentsOf: u2)
+        else { return nil }
+        let image = NSImage(size: NSSize(width: 18, height: 18))
+        image.addRepresentation(r1)
+        image.addRepresentation(r2)
+        return image
     }
 
     private func buildMenu() {
