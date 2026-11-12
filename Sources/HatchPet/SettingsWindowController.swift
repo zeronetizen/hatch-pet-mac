@@ -57,7 +57,7 @@ final class SettingsWindowController: NSObject {
 
     private func ensureWindow() -> NSWindow {
         if let window { return window }
-        let W: CGFloat = 540, H: CGFloat = 868
+        let W: CGFloat = 540, H: CGFloat = 892
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -211,6 +211,14 @@ final class SettingsWindowController: NSObject {
         cancelBtn.keyEquivalent = "\u{1b}"
         cancelBtn.frame = NSRect(x: W - 232, y: 16, width: 100, height: 32)
         content.addSubview(cancelBtn)
+
+        // 底部左下角版本小字（运行时从 Info.plist 读，打包版本变了自动跟上）
+        let versionLabel = NSTextField(labelWithString: AppVersion.displayString)
+        versionLabel.font = .systemFont(ofSize: 11)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.frame = NSRect(x: 20, y: 24, width: 240, height: 16)
+        content.addSubview(versionLabel)
+        PetLog.d("设置窗口版本行：\(AppVersion.displayString)")
 
         self.window = win
         return win

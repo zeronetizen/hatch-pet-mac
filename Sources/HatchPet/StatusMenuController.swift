@@ -49,6 +49,12 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     private func buildMenu() {
+        // 顶部版本行（禁用，仅展示）：菜单只在 init 时建一次，refresh 不加项，不会重复
+        let versionItem = NSMenuItem(title: AppVersion.displayString, action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        menu.addItem(.separator())
+
         headerItem = NSMenuItem(title: "状态：—", action: nil, keyEquivalent: "")
         headerItem.isEnabled = false
         menu.addItem(headerItem)
