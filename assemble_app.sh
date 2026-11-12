@@ -33,6 +33,27 @@ rm -rf "${APP}/Contents/Resources/skill/relay-channel"
 cp -R skill/relay-channel "${APP}/Contents/Resources/skill/"
 test -f "${APP}/Contents/Resources/skill/relay-channel/SKILL.md"
 
+# 3.6) 应用图标：Packaging/icon-1024.png → iconset（sips）→ AppIcon.icns（iconutil）
+ICON_SRC="Packaging/icon-1024.png"
+test -f "${ICON_SRC}"
+ICONSET="AppIcon.iconset"
+rm -rf "${ICONSET}"
+mkdir -p "${ICONSET}"
+sips -z 16 16     "${ICON_SRC}" --out "${ICONSET}/icon_16x16.png" >/dev/null
+sips -z 32 32     "${ICON_SRC}" --out "${ICONSET}/icon_16x16@2x.png" >/dev/null
+sips -z 32 32     "${ICON_SRC}" --out "${ICONSET}/icon_32x32.png" >/dev/null
+sips -z 64 64     "${ICON_SRC}" --out "${ICONSET}/icon_32x32@2x.png" >/dev/null
+sips -z 128 128   "${ICON_SRC}" --out "${ICONSET}/icon_128x128.png" >/dev/null
+sips -z 256 256   "${ICON_SRC}" --out "${ICONSET}/icon_128x128@2x.png" >/dev/null
+sips -z 256 256   "${ICON_SRC}" --out "${ICONSET}/icon_256x256.png" >/dev/null
+sips -z 512 512   "${ICON_SRC}" --out "${ICONSET}/icon_256x256@2x.png" >/dev/null
+sips -z 512 512   "${ICON_SRC}" --out "${ICONSET}/icon_512x512.png" >/dev/null
+sips -z 1024 1024 "${ICON_SRC}" --out "${ICONSET}/icon_512x512@2x.png" >/dev/null
+iconutil -c icns "${ICONSET}" -o "${APP}/Contents/Resources/AppIcon.icns"
+test -s "${APP}/Contents/Resources/AppIcon.icns"
+rm -rf "${ICONSET}"
+echo "已生成应用图标：${APP}/Contents/Resources/AppIcon.icns"
+
 # 4) SwiftPM 资源包一并放入 Contents/Resources，保证 Bundle.module 回退可用
 RES_BUNDLE="$(find .build -name "HatchPet_HatchPet.bundle" -type d | head -n 1 || true)"
 if [ -n "${RES_BUNDLE}" ]; then
