@@ -1,6 +1,7 @@
 import AppKit
+import UniformTypeIdentifiers
 
-/// 设置窗口：通道服务器 / 通道名 / accesskey（钥匙串）/ 轮询间隔 + 测试连接 + 详细说明。
+/// 设置窗口：通道服务器 / 通道名 / accesskey（钥匙串）/ 轮询间隔 + 测试连接 + 导出 skill 包 + 详细说明。
 /// 服务器、通道名、间隔存 UserDefaults；accesskey 只进 macOS 钥匙串（见 KeychainStore）。
 /// 保存后经 onSave 回调让 AppDelegate 立即重启轮询器生效。
 final class SettingsWindowController: NSObject {
@@ -13,6 +14,8 @@ final class SettingsWindowController: NSObject {
     private var keyHint: NSTextField!
     private var intervalPopup: NSPopUpButton!
     private var statusLabel: NSTextField!
+    private var exportButton: NSButton!
+    private var exportHint: NSTextField!
 
     private static let helpText = """
     【每个字段是什么】
@@ -29,6 +32,9 @@ final class SettingsWindowController: NSObject {
 
     【没配置会怎样】
     accesskey 留空（保存后即清除钥匙串记录）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
+
+    【把这条通道分享给信任的人】
+    设置页下方有「导出 skill 包」：填好 accesskey 并保存后可用。导出的 zip 里装着部署 skill（对方的 Muse 装上它就能部署或对接通道）和一份 pet-channel.json（当前服务器地址、通道名与 accesskey）。拿到这个包的人可以读写你的这条通道——只发给信任的人，不要发到公开场合。
     """
 
     func show() {
@@ -44,7 +50,7 @@ final class SettingsWindowController: NSObject {
 
     private func ensureWindow() -> NSWindow {
         if let window { return window }
-        let W: CGFloat = 540, H: CGFloat = 660
+        let W: CGFloat = 540, H: CGFloat = 762
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -116,6 +122,35 @@ final class SettingsWindowController: NSObject {
         content.addSubview(statusLabel)
         cursor -= 56
 
+        // 导出 skill 小节
+        let sep = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
+        sep.boxType = .separator
+        content.addSubview(sep)
+        cursor -= 10
+        let exportTitle = NSTextField(labelWithString: "导出 skill")
+        exportTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        exportTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
+        content.addSubview(exportTitle)
+        cursor -= 24
+        exportButton = NSButton(title: "导出 skill 包…", target: self, action: #selector(exportSkill))
+        exportButton.bezelStyle = .rounded
+        exportButton.frame = NSRect(x: fieldX, y: cursor - 28, width: 150, height: 28)
+        content.addSubview(exportButton)
+        exportHint = NSTextField(labelWithString: "")
+        exportHint.font = .systemFont(ofSize: 11)
+        exportHint.textColor = .secondaryLabelColor
+        exportHint.frame = NSRect(x: fieldX + 160, y: cursor - 26, width: fieldW - 160, height: 22)
+        content.addSubview(exportHint)
+        cursor -= 34
+        let exportWarn = NSTextField(labelWithString: "导出包内含当前服务器、通道名与 accesskey，拿到的人可读写这个通道，只发给信任的人。")
+        exportWarn.font = .systemFont(ofSize: 11)
+        exportWarn.textColor = .secondaryLabelColor
+        exportWarn.lineBreakMode = .byWordWrapping
+        exportWarn.maximumNumberOfLines = 2
+        exportWarn.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
+        content.addSubview(exportWarn)
+        cursor -= 34
+
         // 详细说明
         let helpLabel = NSTextField(labelWithString: "说明")
         helpLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -164,6 +199,7 @@ final class SettingsWindowController: NSObject {
             keyHint.stringValue = "钥匙串里暂无通道「\(cfg.channel)」的钥；留空保存则保持未配置。"
         }
         statusLabel.stringValue = "填好后可先测试连接，再保存。"
+        refreshExportState()
         PetLog.d("设置窗口已载入 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s keyPresent=\(keyField.stringValue.isEmpty ? false : true)")
     }
 
@@ -237,6 +273,7 @@ final class SettingsWindowController: NSObject {
         } else {
             KeychainStore.save(key: key, account: cfg.channel)
         }
+        refreshExportState()
         onSave?()
         window?.close()
         PetLog.d("设置已保存并生效（轮询器将按新配置重启）")
@@ -245,6 +282,139 @@ final class SettingsWindowController: NSObject {
     @objc private func cancel() {
         PetLog.d("设置窗口取消（不保存）")
         window?.close()
+    }
+
+    // MARK: - 导出 skill 包
+
+    /// 当前通道名（字段为空时用默认值）与服务器基地址（字段为空时用默认、去尾斜杠）。
+    private func currentChannelName() -> String {
+        let ch = channelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ch.isEmpty ? ChannelSettings.defaultChannel : ch
+    }
+
+    private func currentServerBase() -> String {
+        let s = serverField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var base = s.isEmpty ? ChannelSettings.defaultServer : s
+        while base.hasSuffix("/") { base.removeLast() }
+        return base
+    }
+
+    /// .app 内置 skill 模板目录（assemble 时拷到 Contents/Resources/skill/relay-channel）；缺失返回 nil。
+    private func skillTemplateDir() -> URL? {
+        guard let res = Bundle.main.resourceURL else { return nil }
+        let dir = res.appendingPathComponent("skill/relay-channel", isDirectory: true)
+        let md = dir.appendingPathComponent("SKILL.md")
+        return FileManager.default.fileExists(atPath: md.path) ? dir : nil
+    }
+
+    /// 刷新导出按钮可用状态：模板缺失或钥匙串无当前通道的钥时禁用。窗口打开与保存后调用。
+    private func refreshExportState() {
+        guard let exportButton, let exportHint else { return }
+        if skillTemplateDir() == nil {
+            exportButton.isEnabled = false
+            exportHint.stringValue = "应用内未找到 skill 模板，无法导出。"
+            PetLog.d("导出 skill 不可用：Bundle 内未找到 skill/relay-channel 模板")
+            return
+        }
+        let channel = currentChannelName()
+        if let key = ChannelSettings.accessKey(for: channel), !key.isEmpty {
+            exportButton.isEnabled = true
+            exportHint.stringValue = "可导出，将含通道「\(channel)」的 accesskey。"
+            PetLog.d("导出 skill 可用 channel=\(channel)（钥在钥匙串中）")
+        } else {
+            exportButton.isEnabled = false
+            exportHint.stringValue = "先填入 accesskey 并保存后可导出。"
+            PetLog.d("导出 skill 不可用：钥匙串无通道 \(channel) 的 accesskey")
+        }
+    }
+
+    @objc private func exportSkill() {
+        let channel = currentChannelName()
+        let server = currentServerBase()
+        guard let template = skillTemplateDir() else {
+            statusLabel.stringValue = "导出失败：应用内未找到 skill 模板。"
+            PetLog.d("skill 导出失败 channel=\(channel)：模板缺失")
+            return
+        }
+        guard let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
+            statusLabel.stringValue = "导出失败：钥匙串里没有通道「\(channel)」的 accesskey，请先填写并保存。"
+            PetLog.d("skill 导出失败 channel=\(channel)：钥匙串无钥")
+            refreshExportState()
+            return
+        }
+        let fm = FileManager.default
+        let staging = fm.temporaryDirectory.appendingPathComponent("hatchpet-skill-export-\(UUID().uuidString)", isDirectory: true)
+        let pkgDir = staging.appendingPathComponent("relay-channel-setup", isDirectory: true)
+        defer { try? fm.removeItem(at: staging) }
+        do {
+            try fm.createDirectory(at: pkgDir, withIntermediateDirectories: true)
+            for item in try fm.contentsOfDirectory(atPath: template.path) {
+                try fm.copyItem(at: template.appendingPathComponent(item),
+                                to: pkgDir.appendingPathComponent(item))
+            }
+            let cfg: [String: Any] = [
+                "server_url": server,
+                "channel": channel,
+                "accesskey": key,
+                "exported_at": ISO8601DateFormatter().string(from: Date()),
+                "note": "含通道钥，只发给信任的人",
+            ]
+            let data = try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: pkgDir.appendingPathComponent("pet-channel.json"), options: .atomic)
+            PetLog.d("skill 导出组包完成 channel=\(channel) server=\(server) 含钥=true（钥原文不记日志）")
+        } catch {
+            statusLabel.stringValue = "导出失败：组包出错（\(error.localizedDescription)）"
+            PetLog.d("skill 导出组包失败 channel=\(channel)：\(error.localizedDescription)")
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = "导出 skill 包"
+        panel.message = "包内含当前通道的 accesskey，只发给信任的人。"
+        panel.nameFieldStringValue = "relay-channel-setup-skill.zip"
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let dest = panel.url else {
+            statusLabel.stringValue = "已取消导出。"
+            PetLog.d("skill 导出被用户取消 channel=\(channel)")
+            return
+        }
+        do {
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            let ok: Bool
+            if fm.fileExists(atPath: "/usr/bin/ditto") {
+                ok = runTool("/usr/bin/ditto", ["-c", "-k", "--keepParent", pkgDir.path, dest.path])
+            } else {
+                ok = runTool("/usr/bin/zip", ["-r", dest.path, "relay-channel-setup"], currentDir: staging.path)
+            }
+            guard ok else {
+                throw NSError(domain: "HatchPetExport", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "打包命令执行失败"])
+            }
+        } catch {
+            statusLabel.stringValue = "导出失败：\(error.localizedDescription)"
+            PetLog.d("skill 导出打包失败 channel=\(channel)：\(error.localizedDescription)")
+            return
+        }
+        statusLabel.stringValue = "已导出 skill 包到：\(dest.path)"
+        PetLog.d("skill 导出成功 路径=\(dest.path) 通道=\(channel) 含钥=true")
+    }
+
+    private func runTool(_ path: String, _ args: [String], currentDir: String? = nil) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        if let currentDir { p.currentDirectoryURL = URL(fileURLWithPath: currentDir) }
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
+        do {
+            try p.run()
+        } catch {
+            PetLog.d("导出工具启动失败 \(path)：\(error.localizedDescription)")
+            return false
+        }
+        p.waitUntilExit()
+        PetLog.d("导出工具 \(path) 退出码 \(p.terminationStatus)")
+        return p.terminationStatus == 0
     }
 
     private static func timeString(ms: Double) -> String {

@@ -27,6 +27,12 @@ for f in ${VIDEOS}; do
   cp "Sources/HatchPet/Resources/${f}" "${APP}/Contents/Resources/${f}"
 done
 
+# 3.5) skill 模板：设置面板「导出 skill 包」运行时从 Contents/Resources/skill/relay-channel 读
+mkdir -p "${APP}/Contents/Resources/skill"
+rm -rf "${APP}/Contents/Resources/skill/relay-channel"
+cp -R skill/relay-channel "${APP}/Contents/Resources/skill/"
+test -f "${APP}/Contents/Resources/skill/relay-channel/SKILL.md"
+
 # 4) SwiftPM 资源包一并放入 Contents/Resources，保证 Bundle.module 回退可用
 RES_BUNDLE="$(find .build -name "HatchPet_HatchPet.bundle" -type d | head -n 1 || true)"
 if [ -n "${RES_BUNDLE}" ]; then

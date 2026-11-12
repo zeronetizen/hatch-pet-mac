@@ -53,6 +53,25 @@ Cloudflare 免费额度对个人量级足够。
    accesskey 通过安全方式给到客户端（例如在应用设置里由用户本人粘贴，
    应用应存系统钥匙串，不要硬编码进公开代码或安装包）。
 
+## 随包配置 pet-channel.json（可选，来自宠物 App 导出）
+
+有些分发包会在包根目录多一个 `pet-channel.json`——那是从宠物设置导出的现成
+通道配置（由 HatchPet 设置面板的「导出 skill 包」在导出时生成），字段：
+`server_url`、`channel`、`accesskey`、`exported_at`、`note`。
+
+- **按凭证对待**：里面的 accesskey 是明文通道钥。文件落盘权限设 600；不贴到
+  聊天、不写进日志、不提交到任何仓库。拿到它的人可读写这条通道，只在信任的
+  人之间传递。
+- **接收方直接用这条通道**（不想自建服务器时）：把钥写进脚本的钥目录后即可
+  用包内脚本读写。例如在 assets 拷出的工作目录里，先把 `pet-channel.json`
+  里的 accesskey 落成钥文件（由 Muse 操作时同样不要回显钥原文）：
+  `mkdir -p keys && umask 077`，把 accesskey 写入 `keys/<channel>.key`（600）；
+  然后 `RELAY_URL=<server_url> node relay.mjs read <channel>` 读、
+  `RELAY_URL=<server_url> node relay.mjs write <channel> '<json>' --hmac` 写
+  （通道开了 HMAC 才需要 `--hmac`，不确定就带上）。
+- **想用自己的服务器**：无视 `pet-channel.json`，按上面「执行步骤」部署自己
+  的服务；部署完成后建议删掉 `pet-channel.json`，避免两条通道混淆。
+
 ## 钥的保存规矩（硬性）
 
 - 主钥与通道钥只落本机 `keys/` 目录（目录 700、文件 600），脚本之外不复制；

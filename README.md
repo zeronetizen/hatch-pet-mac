@@ -1,4 +1,4 @@
-# Hatch 悬浮宠物 · Mac 版（v0.2：接通用通道）
+# Hatch 悬浮宠物 · Mac 版（v0.3：设置面板可导出 skill 包）
 
 把 Muse 的 5 个日常状态动画做成 macOS 桌面悬浮宠物：无边框透明窗口、始终置顶、
 跨所有桌面空间，播放时用 GPU 着色器实时把视频白底抠成透明（与 Android v0.2 同方案同参数）。
@@ -100,3 +100,21 @@ mac/
 - [ ] 用 relay.mjs 往通道写 working + message，宠物应在轮询间隔内切到办公并冒泡显示消息，菜单出现「最新消息」
 - [ ] 写 event=milestone，宠物播一遍庆祝回落；断网/停写 5 分钟后宠物变暗，恢复写入后还原
 - [ ] 尺寸菜单出现 100pt 并可切换；清空钥保存后通道关闭、宠物回本地手动模式
+
+## v0.3 新增
+
+- 设置面板新增「导出 skill」小节：钥匙串里有当前通道的 accesskey 时可点
+  「导出 skill 包…」，运行时把内置 skill 模板（打包在 .app 的
+  `Contents/Resources/skill/relay-channel`，源自仓内 `skill/`）现组包，
+  并生成含当前服务器/通道名/accesskey 的 `pet-channel.json` 写进包根，
+  打成 `relay-channel-setup-skill.zip` 让用户选位置保存。拿到包的人装上
+  skill 并按其中 pet-channel.json 的说明即可读写这条通道——包内含钥，
+  只发给信任的人。无钥时按钮禁用并注明先填钥保存。
+- 随仓 skill 的 SKILL.md 同步新增「随包配置 pet-channel.json」一节（导出模板
+  即仓内 skill/，天然一致）。
+
+## v0.3 新增验收点
+
+- [ ] 设置里填好钥并保存后，「导出 skill 包…」按钮变可点；未填钥时禁用且有小字说明
+- [ ] 导出后解压 zip：relay-channel-setup/ 下有 SKILL.md、assets/ 四件与 pet-channel.json（内容为当前服务器/通道/钥）
+- [ ] 换一台 Mac 或另一个 Muse 装这个包，能按 SKILL.md 说明读到该通道状态
