@@ -1,12 +1,16 @@
 import AppKit
 import Foundation
 
-/// GitHub 自助更新（v0.11）：从公开仓 zeronetizen/hatch-pet-mac 的 Releases
-/// 检查新版并自助替换。发版规范（自 v0.11 起，见 .github/workflows/build.yml）：
-/// 正式 Release 的 tag 为 v<语义版本>（如 v0.11）、标题含版本号、资产固定为
+/// GitHub 自助更新（v0.11 上线，v0.13 换数据源）：从公开仓
+/// zeronetizen/hatch-pet-mac 的 Releases 检查新版并自助替换。
+/// 发版规范（自 v0.11 起，见 .github/workflows/build.yml）：正式 Release 的
+/// tag 为 v<语义版本>（如 v0.13）、标题含版本号、资产固定为
 /// HatchPet-mac.zip；debug-* 是构建日志 Release，解析时一律跳过。
-/// 检查与下载都走用户已配的代理（RelaySession，与轮询/测试连接同路），
-/// 因为 GitHub 在用户网络环境下直连同样可能被干扰。
+/// 数据源（v0.13）：主用仓库网页端点 releases.atom，失败兜底 releases/latest
+/// 的 302 跳转取 tag。GitHub 的 API 子域未认证限流 60 次/小时按出口 IP 算，
+/// 用户经共享代理出口时额度常被他人用满（v0.11/v0.12 真机检查必报 403），
+/// 代码里不要再用它。检查与下载都走用户已配的代理（RelaySession，与轮询/
+/// 测试连接同路），因为 GitHub 在用户网络环境下直连同样可能被干扰。
 /// 安全边界：只认官方仓这一个源；下载后先校验解压结构与新版 Info.plist
 /// 版本确实更高才替换；不执行下载包里的任何代码——替换动作用本 App 自己
 /// 生成的一次性 shell 助手完成（等主进程退出 → 换 .app → 去隔离 → 重开）。
@@ -28,7 +32,9 @@ enum UpdateChecker {
         case failed(String)
     }
 
-    private static let releasesAPI = "https://api.github.com/repos/zeronetizen/hatch-pet-mac/releases?per_page=30"
+    private static let repoBase = "https://github.com/zeronetizen/hatch-pet-mac"
+    private static let releasesAtom = "https://github.com/zeronetizen/hatch-pet-mac/releases.atom"
+    private static let releasesLatest = "https://github.com/zeronetizen/hatch-pet-mac/releases/latest"
     private static let releasesPage = "https://github.com/zeronetizen/hatch-pet-mac/releases"
     private static let assetName = "HatchPet-mac.zip"
     private static let lastAutoCheckKey = "update.lastAutoCheckAt"
@@ -85,93 +91,185 @@ enum UpdateChecker {
         performCheck(manual: true, status: status)
     }
 
+    /// 检查流程（v0.13）：主数据源是仓库网页端点 releases.atom——GitHub 的
+    /// API 子域未认证限流 60 次/小时按出口 IP 算，用户经共享代理出口时额度常被别人
+    /// 用满、点检查必 403；atom 与 releases/latest 都是普通网页端点，不吃这
+    /// 个限流。atom 请求失败、或解析不到任何带语义版本的条目时，再用
+    /// releases/latest 的 302 跳转目标兜底取最新 tag（只有版本号、无说明）；
+    /// 两路都失败才报检查失败，错误信息带实际端点与状态码便于再定位。
     private static func performCheck(manual: Bool, status: @escaping (String) -> Void) {
-        guard let url = URL(string: releasesAPI) else {
-            status("检查失败：API 地址无效")
+        let proxy = ChannelSettings.load().proxy
+        fetchAtom(proxy: proxy) { entries, atomError in
+            if let entries, let best = bestRelease(in: entries) {
+                PetLog.d("更新检查（数据源=atom）：共 \(entries.count) 条，最高版本 v\(best.version)")
+                finish(best: best, manual: manual, status: status)
+                return
+            }
+            let atomWhy = atomError ?? "atom 里没有可解析出语义版本的条目"
+            PetLog.d("更新检查：atom 未得到可用版本（\(atomWhy)），转 releases/latest 兜底")
+            fetchLatestTag(proxy: proxy) { tag, latestError in
+                if let tag, let parts = parseVersion(tag) {
+                    let info = ReleaseInfo(
+                        version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+                        versionParts: parts,
+                        tag: tag,
+                        title: "HatchPet \(tag)",
+                        notes: "",
+                        zipURL: downloadURL(forTag: tag),
+                        publishedAt: "")
+                    PetLog.d("更新检查（数据源=latest-redirect）：最新 tag=\(tag) v\(info.version)")
+                    finish(best: info, manual: manual, status: status)
+                } else if let tag {
+                    PetLog.d("更新检查（数据源=latest-redirect）：tag=\(tag) 解析不出语义版本")
+                    deliver(.unparsableLatest, manual: manual, status: status)
+                } else {
+                    let latestWhy = latestError ?? "无 Location 头"
+                    deliver(.failed("releases.atom：\(atomWhy)；releases/latest：\(latestWhy)"),
+                            manual: manual, status: status)
+                }
+            }
+        }
+    }
+
+    /// 按 best 与当前版本比较得出 Outcome，走与原来相同的提示路径。
+    private static func finish(best: ReleaseInfo, manual: Bool, status: @escaping (String) -> Void) {
+        let current = parseVersion(currentVersionString) ?? [0, 0, 0]
+        let outcome: Outcome = isNewer(best.versionParts, than: current)
+            ? .updateAvailable(best) : .upToDate(latest: best.version)
+        deliver(outcome, manual: manual, status: status)
+    }
+
+    private static func deliver(_ outcome: Outcome, manual: Bool, status: @escaping (String) -> Void) {
+        DispatchQueue.main.async {
+            switch outcome {
+            case .updateAvailable(let info):
+                PetLog.d("发现新版 v\(info.version)（tag=\(info.tag) published=\(info.publishedAt)）current=v\(currentVersionString)")
+                status("发现新版本 v\(info.version)")
+                presentUpdatePrompt(info)
+            case .upToDate(let latest):
+                PetLog.d("已是最新 current=v\(currentVersionString) latest=\(latest ?? "无")")
+                status("已是最新版本（当前 v\(currentVersionString)）")
+            case .unparsableLatest:
+                PetLog.d("最新 Release 无法解析出语义版本（既有 build-* 旧规范或异常），不报有更新")
+                status("无法解析最新 Release 的版本号，请手动查看 Release 页：\(releasesPage)")
+            case .failed(let msg):
+                PetLog.d("更新检查失败：\(msg)（manual=\(manual)）")
+                if manual { status("检查更新失败：\(msg)") }
+            }
+        }
+    }
+
+    /// 拉 releases.atom 并解析成条目；失败时回 (nil, 带端点与状态码的原因）。
+    private static func fetchAtom(proxy: ProxyConfig,
+                                  completion: @escaping ([AtomEntry]?, String?) -> Void) {
+        guard let url = URL(string: releasesAtom) else {
+            completion(nil, "releases.atom 地址无效")
             return
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("application/atom+xml", forHTTPHeaderField: "Accept")
         request.setValue("HatchPet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
-        let proxy = ChannelSettings.load().proxy
         let session = RelaySession.makeSession(proxy: proxy)
-        PetLog.d("更新检查 GET api.github.com/repos/zeronetizen/hatch-pet-mac/releases proxy=\(proxy.summary)")
+        PetLog.d("更新检查 GET releases.atom proxy=\(proxy.summary)")
         session.dataTask(with: request) { data, response, error in
             session.finishTasksAndInvalidate()
-            let outcome: Outcome
             if let error {
-                outcome = .failed("网络错误：\(error.localizedDescription)")
-            } else if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                outcome = .failed("GitHub API 返回 HTTP \(http.statusCode)")
-            } else if let data {
-                outcome = interpret(data: data)
-            } else {
-                outcome = .failed("GitHub API 无响应数据")
+                completion(nil, "releases.atom 网络错误：\(error.localizedDescription)")
+                return
             }
-            DispatchQueue.main.async {
-                switch outcome {
-                case .updateAvailable(let info):
-                    PetLog.d("发现新版 v\(info.version)（tag=\(info.tag) published=\(info.publishedAt)）current=v\(currentVersionString)")
-                    status("发现新版本 v\(info.version)")
-                    presentUpdatePrompt(info)
-                case .upToDate(let latest):
-                    PetLog.d("已是最新 current=v\(currentVersionString) latest=\(latest ?? "无")")
-                    status("已是最新版本（当前 v\(currentVersionString)）")
-                case .unparsableLatest:
-                    PetLog.d("最新 Release 无法解析出语义版本（既有 build-* 旧规范或异常），不报有更新")
-                    status("无法解析最新 Release 的版本号，请手动查看 Release 页：\(releasesPage)")
-                case .failed(let msg):
-                    PetLog.d("更新检查失败：\(msg)（manual=\(manual)）")
-                    if manual { status("检查更新失败：\(msg)") }
-                }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard code == 200, let data else {
+                completion(nil, "releases.atom 返回 HTTP \(code)")
+                return
+            }
+            guard let entries = AtomFeedParser().parse(data) else {
+                completion(nil, "releases.atom XML 解析失败")
+                return
+            }
+            completion(entries, nil)
+        }.resume()
+    }
+
+    /// 兜底：请求 releases/latest 但不跟随 302，从 Location 头取最新 tag。
+    private static func fetchLatestTag(proxy: ProxyConfig,
+                                       completion: @escaping (String?, String?) -> Void) {
+        guard let url = URL(string: releasesLatest) else {
+            completion(nil, "releases/latest 地址无效")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.setValue("HatchPet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
+        let stopper = RedirectStopper()
+        let session = URLSession(configuration: RelaySession.makeConfiguration(proxy: proxy),
+                                 delegate: stopper, delegateQueue: nil)
+        PetLog.d("更新检查 GET releases/latest（不跟随跳转）proxy=\(proxy.summary)")
+        session.dataTask(with: request) { _, response, error in
+            session.finishTasksAndInvalidate()
+            if let error {
+                completion(nil, "releases/latest 网络错误：\(error.localizedDescription)")
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completion(nil, "releases/latest 无 HTTP 响应")
+                return
+            }
+            if let loc = http.value(forHTTPHeaderField: "Location"),
+               let tagURL = URL(string: loc), tagURL.path.contains("/releases/tag/") {
+                completion(tagURL.lastPathComponent, nil)
+            } else {
+                completion(nil, "releases/latest 返回 HTTP \(http.statusCode) 且无可用 Location")
             }
         }.resume()
     }
 
-    /// 解析 Releases 列表：跳过 draft/prerelease 与 tag 不是 v<语义版本> 的条目
-    /// （debug-*、旧 build-*），在可解析条目里取版本最高且带 HatchPet-mac.zip 资产的一条。
-    private static func interpret(data: Data) -> Outcome {
-        guard let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-            return .failed("GitHub API 响应不是预期的 JSON 列表")
-        }
+    /// 在 atom 条目里取版本最高的一条：tag 解析不出语义版本的（debug-*、旧
+    /// build-*）跳过；资产下载地址按既定模式拼，不依赖 feed 内容。
+    private static func bestRelease(in entries: [AtomEntry]) -> ReleaseInfo? {
         var best: ReleaseInfo?
-        var sawAnyRelease = false
-        for item in list {
-            if (item["draft"] as? Bool) == true || (item["prerelease"] as? Bool) == true { continue }
-            sawAnyRelease = true
-            guard let tag = item["tag_name"] as? String,
-                  let parts = parseVersion(tag) else { continue }
-            guard let assets = item["assets"] as? [[String: Any]],
-                  let asset = assets.first(where: { ($0["name"] as? String) == assetName }),
-                  let dl = asset["browser_download_url"] as? String,
-                  let zipURL = URL(string: dl) else {
-                PetLog.d("更新解析：tag=\(tag) 版本可解析但缺 \(assetName) 资产，跳过")
-                continue
-            }
+        for entry in entries {
+            guard let parts = parseVersion(entry.tag) else { continue }
             let info = ReleaseInfo(
-                version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+                version: entry.tag.hasPrefix("v") ? String(entry.tag.dropFirst()) : entry.tag,
                 versionParts: parts,
-                tag: tag,
-                title: (item["name"] as? String) ?? tag,
-                notes: (item["body"] as? String) ?? "",
-                zipURL: zipURL,
-                publishedAt: (item["published_at"] as? String) ?? "")
+                tag: entry.tag,
+                title: entry.title.isEmpty ? "HatchPet \(entry.tag)" : entry.title,
+                notes: plainText(fromHTML: entry.contentHTML),
+                zipURL: downloadURL(forTag: entry.tag),
+                publishedAt: entry.updated)
             if let cur = best {
                 if isNewer(parts, than: cur.versionParts) { best = info }
             } else {
                 best = info
             }
         }
-        guard let best else {
-            return sawAnyRelease ? .unparsableLatest : .failed("仓库没有任何 Release")
+        return best
+    }
+
+    private static func downloadURL(forTag tag: String) -> URL {
+        URL(string: "\(repoBase)/releases/download/\(tag)/\(assetName)")!
+    }
+
+    /// atom 的 content 是 HTML：块级标签转行、其余标签剥掉、常见实体还原、
+    /// 空行压缩，最后截 600 字作更新弹窗的说明摘要。
+    static func plainText(fromHTML html: String) -> String {
+        var s = html
+        s = s.replacingOccurrences(of: "(?i)<br\\s*/?>", with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: "(?i)</(p|li|h[1-6]|ol|ul|div|blockquote)>", with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: "(?i)<li[^>]*>", with: "• ", options: .regularExpression)
+        s = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        // &amp; 放最后还原，避免把 &amp;lt; 二次解成 <
+        for (entity, ch) in [("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""),
+                             ("&#39;", "'"), ("&apos;", "'"), ("&nbsp;", " "), ("&amp;", "&")] {
+            s = s.replacingOccurrences(of: entity, with: ch)
         }
-        let current = parseVersion(currentVersionString) ?? [0, 0, 0]
-        if isNewer(best.versionParts, than: current) {
-            return .updateAvailable(best)
-        }
-        return .upToDate(latest: best.version)
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        s = lines.joined(separator: "\n")
+        if s.count > 600 { s = String(s.prefix(600)) }
+        return s
     }
 
     // MARK: - 更新提示与安装
@@ -339,5 +437,87 @@ enum UpdateChecker {
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
         }
+    }
+}
+
+/// releases.atom 的一个条目（只收检查更新需要的四样）。tag 从条目链接
+/// .../releases/tag/<tag> 的末段取；contentHTML 是 content 里的原始 HTML
+/// （XML 实体已被 XMLParser 解过一层），转纯文本在 UpdateChecker.plainText。
+struct AtomEntry {
+    var tag: String
+    var title: String
+    var updated: String
+    var contentHTML: String
+}
+
+/// 极简 Atom 解析器：逐 entry 收 alternate 链接 href、title、updated、content。
+private final class AtomFeedParser: NSObject, XMLParserDelegate {
+    private var entries: [AtomEntry] = []
+    private var inEntry = false
+    private var link = ""
+    private var title = ""
+    private var updated = ""
+    private var content = ""
+    private var text = ""
+
+    func parse(_ data: Data) -> [AtomEntry]? {
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+        parser.shouldProcessNamespaces = false
+        guard parser.parse() else { return nil }
+        return entries
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?,
+                attributes attributeDict: [String: String] = [:]) {
+        if elementName == "entry" {
+            inEntry = true
+            link = ""; title = ""; updated = ""; content = ""
+        } else if inEntry, elementName == "link" {
+            if (attributeDict["rel"] ?? "alternate") == "alternate" {
+                link = attributeDict["href"] ?? ""
+            }
+        }
+        text = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        text += string
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if let s = String(data: CDATABlock, encoding: .utf8) { text += s }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?) {
+        defer { text = "" }
+        guard inEntry else { return }
+        switch elementName {
+        case "title":
+            title = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        case "updated":
+            if updated.isEmpty { updated = text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        case "content":
+            content = text
+        case "entry":
+            let tag = URL(string: link)?.lastPathComponent ?? ""
+            entries.append(AtomEntry(tag: tag, title: title, updated: updated, contentHTML: content))
+            inEntry = false
+        default:
+            break
+        }
+    }
+}
+
+/// 让 URLSession 在重定向处停下（返回 nil 表示不跟随），把 302 响应原样交回
+/// dataTask 的 completion——UpdateChecker 靠它读 releases/latest 的 Location。
+private final class RedirectStopper: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
