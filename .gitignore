@@ -1,0 +1,4 @@
+.build/
+*.app/
+HatchPet-mac.zip
+.DS_Store
