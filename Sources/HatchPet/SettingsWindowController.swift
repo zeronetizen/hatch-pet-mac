@@ -1,7 +1,7 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// 设置窗口：通道服务器 / 通道名 / accesskey（钥匙串）/ 轮询间隔 + 测试连接 + 导出 skill 包 + 详细说明。
+/// 设置窗口：通道服务器 / 通道名 / accesskey（钥匙串）/ 轮询间隔 / 代理 + 测试连接 + 导出 skill 包 + 详细说明。
 /// 服务器、通道名、间隔存 UserDefaults；accesskey 只进 macOS 钥匙串（见 KeychainStore）。
 /// 保存后经 onSave 回调让 AppDelegate 立即重启轮询器生效。
 final class SettingsWindowController: NSObject {
@@ -13,6 +13,10 @@ final class SettingsWindowController: NSObject {
     private var keyField: NSSecureTextField!
     private var keyHint: NSTextField!
     private var intervalPopup: NSPopUpButton!
+    private var proxyCheckbox: NSButton!
+    private var proxyTypePopup: NSPopUpButton!
+    private var proxyHostField: NSTextField!
+    private var proxyPortField: NSTextField!
     private var statusLabel: NSTextField!
     private var exportButton: NSButton!
     private var exportHint: NSTextField!
@@ -29,6 +33,9 @@ final class SettingsWindowController: NSObject {
 
     【想用自己的服务器】
     本仓库附带一个给 Muse 用的部署 skill：skill/relay-channel（SKILL.md + assets/ 里是服务端全部代码）。把它装进你自己的 Muse，然后对它说一句「用 skill/relay-channel 部署我自己的通道」，它会引导你在你自己的 Cloudflare 账号上一键部署一套同样的通道服务、建好第一条通道，并把新服务器的地址和 accesskey 交给你。把那两个值填回本设置页即可，之后数据只走你自己的服务器。为安全起见，部署时 Cloudflare 的 API token 走安全凭证流程，不要把任何密钥明文粘贴到聊天或文件里。
+
+    【测试连接报 TLS 错误怎么办】
+    默认服务器域名（*.workers.dev）在某些网络下直连会被干扰，TLS 握手直接失败。这不是钥或通道填错。办法一：在你的代理客户端（如 mihomo）里把 workers.dev 设为走代理。办法二：用本页的「代理」小节——勾选「使用代理连接服务器」，填本机代理客户端的监听地址（混合端口如 127.0.0.1:7890 选 HTTP；纯 SOCKS5 端口选 SOCKS5），保存后轮询与测试连接都会经它出海，与系统 TUN 规则互不影响。
 
     【没配置会怎样】
     accesskey 留空（保存后即清除钥匙串记录）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
@@ -50,7 +57,7 @@ final class SettingsWindowController: NSObject {
 
     private func ensureWindow() -> NSWindow {
         if let window { return window }
-        let W: CGFloat = 540, H: CGFloat = 762
+        let W: CGFloat = 540, H: CGFloat = 868
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -108,6 +115,31 @@ final class SettingsWindowController: NSObject {
         }
         content.addSubview(intervalPopup)
         cursor -= 40
+
+        // 代理小节：开关 + 类型/主机/端口 + 说明（直连 TLS 失败时经本机代理出海）
+        _ = addLabel("代理", top: cursor)
+        proxyCheckbox = NSButton(checkboxWithTitle: "使用代理连接服务器", target: self, action: #selector(proxyToggled))
+        proxyCheckbox.frame = NSRect(x: fieldX, y: cursor - 24, width: 240, height: 24)
+        content.addSubview(proxyCheckbox)
+        cursor -= 34
+        proxyTypePopup = NSPopUpButton(frame: NSRect(x: fieldX, y: cursor - 26, width: 96, height: 26), pullsDown: false)
+        proxyTypePopup.addItems(withTitles: ["HTTP", "SOCKS5"])
+        content.addSubview(proxyTypePopup)
+        proxyHostField = NSTextField(frame: NSRect(x: fieldX + 104, y: cursor - 24, width: 176, height: 24))
+        proxyHostField.placeholderString = ProxyConfig.defaultHost
+        content.addSubview(proxyHostField)
+        proxyPortField = NSTextField(frame: NSRect(x: fieldX + 288, y: cursor - 24, width: 84, height: 24))
+        proxyPortField.placeholderString = "\(ProxyConfig.defaultPort)"
+        content.addSubview(proxyPortField)
+        cursor -= 32
+        let proxyHint = NSTextField(labelWithString: "直连服务器失败（如 TLS 错误）时，可填本机代理客户端的监听地址，例如 mihomo/Clash 的 127.0.0.1:7890（混合端口选 HTTP 即可）。")
+        proxyHint.font = .systemFont(ofSize: 11)
+        proxyHint.textColor = .secondaryLabelColor
+        proxyHint.lineBreakMode = .byWordWrapping
+        proxyHint.maximumNumberOfLines = 2
+        proxyHint.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
+        content.addSubview(proxyHint)
+        cursor -= 36
 
         // 测试连接 + 状态行
         let testBtn = NSButton(title: "测试连接", target: self, action: #selector(testConnection))
@@ -198,9 +230,40 @@ final class SettingsWindowController: NSObject {
             keyField.stringValue = ""
             keyHint.stringValue = "钥匙串里暂无通道「\(cfg.channel)」的钥；留空保存则保持未配置。"
         }
+        proxyCheckbox.state = cfg.proxy.enabled ? .on : .off
+        proxyTypePopup.selectItem(at: cfg.proxy.type == "socks" ? 1 : 0)
+        proxyHostField.stringValue = cfg.proxy.host
+        proxyPortField.stringValue = "\(cfg.proxy.port)"
+        updateProxyControls()
         statusLabel.stringValue = "填好后可先测试连接，再保存。"
         refreshExportState()
-        PetLog.d("设置窗口已载入 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s keyPresent=\(keyField.stringValue.isEmpty ? false : true)")
+        PetLog.d("设置窗口已载入 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary) keyPresent=\(keyField.stringValue.isEmpty ? false : true)")
+    }
+
+    // MARK: - 代理小节
+
+    @objc private func proxyToggled() {
+        updateProxyControls()
+        PetLog.d("代理开关切换为 \(proxyCheckbox.state == .on ? "开" : "关")（保存后生效，测试连接立即按当前勾选走）")
+    }
+
+    /// 未勾选时类型/主机/端口置灰
+    private func updateProxyControls() {
+        let on = proxyCheckbox.state == .on
+        proxyTypePopup.isEnabled = on
+        proxyHostField.isEnabled = on
+        proxyPortField.isEnabled = on
+    }
+
+    /// 从当前字段读代理配置（保存与测试连接共用，测试不必先保存）
+    private func proxyFromFields() -> ProxyConfig {
+        let host = proxyHostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = Int(proxyPortField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { (1...65535).contains($0) ? $0 : nil } ?? ProxyConfig.defaultPort
+        return ProxyConfig(enabled: proxyCheckbox.state == .on,
+                           type: proxyTypePopup.indexOfSelectedItem == 1 ? "socks" : "http",
+                           host: host.isEmpty ? ProxyConfig.defaultHost : host,
+                           port: port)
     }
 
     // MARK: - Actions
@@ -224,8 +287,11 @@ final class SettingsWindowController: NSObject {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        PetLog.d("测试连接 GET \(base)/c/\(channel)")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        let proxy = proxyFromFields()
+        PetLog.d("测试连接 GET \(base)/c/\(channel) proxy=\(proxy.summary)")
+        let session = RelaySession.makeSession(proxy: proxy)
+        session.dataTask(with: request) { [weak self] data, response, error in
+            session.finishTasksAndInvalidate()
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let error {
@@ -264,7 +330,8 @@ final class SettingsWindowController: NSObject {
         let interval = (intervalPopup.selectedItem?.representedObject as? Int) ?? ChannelSettings.defaultInterval
         let cfg = ChannelConfig(server: server.isEmpty ? ChannelSettings.defaultServer : server,
                                 channel: channel.isEmpty ? ChannelSettings.defaultChannel : channel,
-                                intervalSec: interval)
+                                intervalSec: interval,
+                                proxy: proxyFromFields())
         ChannelSettings.save(cfg)
         let key = keyField.stringValue
         if key.isEmpty {

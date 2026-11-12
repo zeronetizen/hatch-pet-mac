@@ -1,10 +1,30 @@
 import Foundation
 
-/// 通道连接配置：服务器/通道名/轮询间隔存 UserDefaults；accesskey 只存钥匙串。
+/// 代理配置：走 UserDefaults（非敏感，不进钥匙串）。启用时 App 的会话经本机代理
+/// 客户端（如 mihomo/Clash 的 127.0.0.1:7890）出海，绕开直连 TLS 被干扰的问题。
+struct ProxyConfig {
+    var enabled: Bool
+    /// "http"（含 HTTPS CONNECT）或 "socks"（SOCKS5）
+    var type: String
+    var host: String
+    var port: Int
+
+    static let defaultType = "http"
+    static let defaultHost = "127.0.0.1"
+    static let defaultPort = 7890
+    static let disabled = ProxyConfig(enabled: false, type: defaultType, host: defaultHost, port: defaultPort)
+
+    /// 实际生效：启用且主机/端口有效
+    var isActive: Bool { enabled && !host.isEmpty && port > 0 && port <= 65535 }
+    var summary: String { isActive ? "\(type) \(host):\(port)" : "关" }
+}
+
+/// 通道连接配置：服务器/通道名/轮询间隔/代理存 UserDefaults；accesskey 只存钥匙串。
 struct ChannelConfig {
     var server: String
     var channel: String
     var intervalSec: Int
+    var proxy: ProxyConfig
 
     /// 归一化后的服务器基地址（去掉尾部斜杠）
     var baseURL: String {
@@ -24,6 +44,10 @@ enum ChannelSettings {
         static let server = "channel.server"
         static let channel = "channel.name"
         static let interval = "channel.intervalSec"
+        static let proxyEnabled = "proxy.enabled"
+        static let proxyType = "proxy.type"
+        static let proxyHost = "proxy.host"
+        static let proxyPort = "proxy.port"
     }
 
     static func load() -> ChannelConfig {
@@ -32,7 +56,12 @@ enum ChannelSettings {
         let channel = d.string(forKey: Key.channel) ?? defaultChannel
         let savedInterval = d.object(forKey: Key.interval) as? Int
         let interval = savedInterval.flatMap { intervalChoices.contains($0) ? $0 : nil } ?? defaultInterval
-        return ChannelConfig(server: server, channel: channel, intervalSec: interval)
+        var proxy = ProxyConfig.disabled
+        proxy.enabled = d.bool(forKey: Key.proxyEnabled)
+        if let t = d.string(forKey: Key.proxyType), t == "socks" || t == "http" { proxy.type = t }
+        if let h = d.string(forKey: Key.proxyHost), !h.isEmpty { proxy.host = h }
+        if let p = d.object(forKey: Key.proxyPort) as? Int, p > 0, p <= 65535 { proxy.port = p }
+        return ChannelConfig(server: server, channel: channel, intervalSec: interval, proxy: proxy)
     }
 
     static func save(_ config: ChannelConfig) {
@@ -40,7 +69,11 @@ enum ChannelSettings {
         d.set(config.server, forKey: Key.server)
         d.set(config.channel, forKey: Key.channel)
         d.set(config.intervalSec, forKey: Key.interval)
-        PetLog.d("通道配置已保存 server=\(config.baseURL) channel=\(config.channel) interval=\(config.intervalSec)s（钥在钥匙串，不在此处）")
+        d.set(config.proxy.enabled, forKey: Key.proxyEnabled)
+        d.set(config.proxy.type, forKey: Key.proxyType)
+        d.set(config.proxy.host, forKey: Key.proxyHost)
+        d.set(config.proxy.port, forKey: Key.proxyPort)
+        PetLog.d("通道配置已保存 server=\(config.baseURL) channel=\(config.channel) interval=\(config.intervalSec)s proxy=\(config.proxy.summary)（钥在钥匙串，不在此处）")
     }
 
     static func accessKey(for channel: String) -> String? {

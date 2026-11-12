@@ -26,6 +26,7 @@ final class ChannelPoller {
 
     private var config: ChannelConfig?
     private var key: String?
+    private var session: URLSession?
     private var timer: Timer?
     private var failCount = 0
     private var paused = false
@@ -39,6 +40,9 @@ final class ChannelPoller {
         inFlight = false
         let cfg = ChannelSettings.load()
         config = cfg
+        // 每次重启按当前设置重建会话（代理改动保存后即经此生效）
+        session?.invalidateAndCancel()
+        session = RelaySession.makeSession(proxy: cfg.proxy)
         key = ChannelSettings.accessKey(for: cfg.channel)
         guard let key, !key.isEmpty else {
             enabled = false
@@ -48,7 +52,7 @@ final class ChannelPoller {
             return
         }
         enabled = true
-        PetLog.d("轮询启动 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s localSeq=\(localSeq)（钥 len=\(key.count)，内容不记日志）")
+        PetLog.d("轮询启动 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary) localSeq=\(localSeq)（钥 len=\(key.count)，内容不记日志）")
         onStatus?("通道：连接中…")
         schedule(after: 0.3)
     }
@@ -86,7 +90,7 @@ final class ChannelPoller {
 
     private func poll() {
         guard enabled, !paused, !inFlight,
-              let cfg = config, let key else { return }
+              let cfg = config, let key, let session else { return }
         inFlight = true
         let gen = generation
         let urlString = "\(cfg.baseURL)/c/\(cfg.channel)?since=\(localSeq)"
@@ -100,7 +104,7 @@ final class ChannelPoller {
         request.timeoutInterval = 10
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         PetLog.d("轮询 GET /c/\(cfg.channel)?since=\(localSeq)")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        session.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self, self.generation == gen else { return }
                 self.inFlight = false
