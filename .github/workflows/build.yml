@@ -22,7 +22,18 @@ jobs:
           uname -m
 
       - name: Assemble app
-        run: bash assemble_app.sh
+        run: |
+          set -eo pipefail
+          bash assemble_app.sh 2>&1 | tee build-output.log
+
+      - name: Publish build log
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: debug-${{ github.run_number }}
+          name: HatchPet build log ${{ github.run_number }}
+          files: build-output.log
+          fail_on_unmatched_files: false
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
