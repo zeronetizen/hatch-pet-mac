@@ -186,7 +186,7 @@ final class BubbleController {
         // 把云形从「原点在云中心」的坐标系平移到视图坐标系
         let dx = -bounds.minX + margin / 2
         let dy = dotsZoneHeight - bounds.minY + margin / 2
-        path.transform(using: AffineTransform(translationByX: dx, translationByY: dy))
+        path.transform(using: AffineTransform(translationByX: dx, byY: dy))
         let center = NSPoint(x: bounds.midX + dx, y: bounds.midY + dy)
         // 圆点串：自云团下沿向下，半径 5 → 3.5 递减，略向左（宠物头顶方向）漂移
         let dots: [(center: NSPoint, radius: CGFloat)] = [
