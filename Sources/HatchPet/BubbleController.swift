@@ -186,9 +186,7 @@ final class BubbleController {
         // 把云形从「原点在云中心」的坐标系平移到视图坐标系
         let dx = -bounds.minX + margin / 2
         let dy = dotsZoneHeight - bounds.minY + margin / 2
-        let shift = NSAffineTransform()
-        shift.translateX(by: dx, yBy: dy)
-        path.transform(using: shift)
+        path.transform(using: AffineTransform(translationByX: dx, translationByY: dy))
         let center = NSPoint(x: bounds.midX + dx, y: bounds.midY + dy)
         // 圆点串：自云团下沿向下，半径 5 → 3.5 递减，略向左（宠物头顶方向）漂移
         let dots: [(center: NSPoint, radius: CGFloat)] = [
@@ -215,8 +213,7 @@ final class BubbleController {
         if flipped {
             // (x, y) -> (x, h - y)，用显式矩阵避免拼接顺序歧义；
             // 作用在布局路径的副本上，不污染原始布局。
-            let flip = NSAffineTransform(transform: NSAffineTransformStruct(
-                m11: 1, m12: 0, m21: 0, m22: -1, tX: 0, tY: h))
+            let flip = AffineTransform(m11: 1, m12: 0, m21: 0, m22: -1, tX: 0, tY: h)
             let p = layout.cloudPath.copy() as! NSBezierPath
             p.transform(using: flip)
             view.cloudPath = p
