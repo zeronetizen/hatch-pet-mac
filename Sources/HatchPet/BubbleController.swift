@@ -7,6 +7,14 @@ import AppKit
 /// - v0.12：一条闭合平滑样条（Catmull-Rom→贝塞尔）一次成形——在核心椭圆上取
 ///   12 个控制点，半径只做低频调制（sin(2θ)/sin(3θ)，总振幅 ≤6%），整朵云只有
 ///   2–3 处大而缓的起伏；单路径可直接 stroke 描边（0.75pt），不再需要垫底法。
+/// - v0.16（wave=v4）：真机反馈 v3「起伏太弱、看着就是个椭圆」。复盘数学：
+///   宽扁核心（长宽比约 2.3）上半径调制在冠部被 sinθ 压平，多大振幅都变不出
+///   顶部起伏（且相位凑巧时会在左右尖端冲出尖角）。改法：① 核心纵向留白
+///   28→46，长宽比收到约 1.7；② 半径调制换 sin(3θ) 主导（尖端处各正弦项
+///   不叠冲高）；③ 上沿再叠一层 cos² 窗瓣的垂直位移（左右两瓣 + 中央矮瓣），
+///   顶部呈「两瓣一鞍」。公式与离线渲染预览逐项对齐后才合入（预览图存
+///   cloud-v0.16-preview.png，三档文字尺寸均验过：起伏可辨、处处光滑、
+///   无单瓣下垂、文字安全区在云内）。
 /// 云形路径（视图坐标）与圆点几何由 BubbleController 按「正常朝向」（云在上、
 /// 圆点在下）算好下发；面板被迫贴到宠物下方时控制器把路径整体 y 镜像后下发，
 /// 本视图不感知朝向。
@@ -52,11 +60,12 @@ final class BubbleController {
     /// 文字安全区最大宽（pt）：云团内圈不规则，文字只放中心安全区，故从旧版 220 收到 200。
     private static let maxContentWidth: CGFloat = 200
     private static let maxLines = 3
-    /// 核心椭圆相对文字的留白：半轴 = 文字半宽 + 34 / 文字半高 + 28。
-    /// v0.12 样条相对核心椭圆有 ≤6% 的低频起伏（最凹处向内约 6%），
-    /// 留白比 v0.10/v0.11 的 30/24 略放大，保证文字四角始终在云内。
+    /// 核心椭圆相对文字的留白：半轴 = 文字半宽 + 34 / 文字半高 + 46。
+    /// 纵向留白 v0.16 由 28 提到 46（缘由见文件头 wave=v4 注）：云团长宽比
+    /// 收到约 1.7，上沿瓣形起伏才有纵向空间被读成「云」；瓣与鞍都在核心
+    /// 椭圆轮廓之外或之上，文字四角始终在云内。
     private static let corePadX: CGFloat = 34
-    private static let corePadY: CGFloat = 28
+    private static let corePadY: CGFloat = 46
     /// 圆点串占高：云下间隙 6 + 大圆直径 10 + 间隙 5 + 小圆直径 7 + 底部余量 2 = 30。
     private static let dotsZoneHeight: CGFloat = 30
 
@@ -113,7 +122,7 @@ final class BubbleController {
         }
         // 显示时长随行数：1 行 6 秒 / 2 行 8 秒 / 3 行 10 秒
         let duration: TimeInterval = lines <= 1 ? 6.0 : (lines == 2 ? 8.0 : 10.0)
-        PetLog.d("气泡显示 shape=cloud wave=v3 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
+        PetLog.d("气泡显示 shape=cloud wave=v4 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
         hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             self?.hide(reason: "到时自动（\(Int(duration)) 秒）")
@@ -138,19 +147,41 @@ final class BubbleController {
 
     // MARK: - 布局
 
-    /// 云轮廓控制点（原点为云中心）：核心椭圆每 30° 一个、共 12 个；半径做
-    /// 低频调制 m = 1 + 0.035·sin(2θ+0.9) + 0.025·sin(3θ+2.2)，总振幅 ≤ 6%，
-    /// 相位写死保证形状稳定。整圈只有 2–3 处大而缓的起伏，不出现离散疙瘩。
-    /// 底部点（sinθ ≤ -0.7）的调制减半，下沿保持相对平齐。
+    /// 云轮廓控制点（原点为云中心）：核心椭圆每 30° 一个、共 12 个。
+    /// wave=v4（v0.16）公式两层：
+    /// ① 半径调制 m = 1 + 0.05·sin(3θ) + 0.015·sin(5θ) + 0.012·sin(2θ+0.9)：
+    ///    sin(3θ) 主导（在 θ=0/π 尖端处恒为 0、两肩 30°/150° 最大），
+    ///    sin(5θ) 给一点不规则小起伏，sin(2θ) 留一丝不对称；底部点
+    ///    （sinθ ≤ -0.7）调制减半，下沿保持平齐。
+    /// ② 上沿瓣位移（只叠加在 sinθ > 0 的点）：以未调制 x 为键，左右
+    ///    x = ±0.52a 各一个 cos² 窗瓣（窗宽 0.50a）、x = 0 一个 0.30 权重的
+    ///    矮瓣，瓣高 H = 0.30b；顶部由此呈「两瓣一鞍」——鞍底（x=0 处轮廓
+    ///    约 1.05b）仍在核心椭圆之上，瓣只加 room、不侵占文字安全区。
+    /// 常量与离线预览（cloud-v0.16-preview.png）逐项对齐，勿凭手感改。
     private static func cloudControlPoints(a: CGFloat, b: CGFloat) -> [NSPoint] {
         var pts: [NSPoint] = []
+        let lobeH = 0.30 * b
         for i in 0..<12 {
             let t = CGFloat(i) * .pi / 6
-            var m: CGFloat = 1 + 0.035 * sin(2 * t + 0.9) + 0.025 * sin(3 * t + 2.2)
+            var m: CGFloat = 1 + 0.05 * sin(3 * t) + 0.015 * sin(5 * t) + 0.012 * sin(2 * t + 0.9)
             if sin(t) <= -0.7 { m = 1 + (m - 1) * 0.5 }
-            pts.append(NSPoint(x: a * cos(t) * m, y: b * sin(t) * m))
+            var y = b * sin(t) * m
+            if sin(t) > 0 {
+                let xa = a * cos(t)   // 瓣窗按未调制 x 定位，不随 m 漂移
+                y += lobeH * (lobeWindow((xa - 0.52 * a) / (0.50 * a))
+                              + 0.30 * lobeWindow(xa / (0.50 * a))
+                              + lobeWindow((xa + 0.52 * a) / (0.50 * a)))
+            }
+            pts.append(NSPoint(x: a * cos(t) * m, y: y))
         }
         return pts
+    }
+
+    /// 瓣窗 g(u) = cos²(πu/2)，|u| ≥ 1 时为 0：瓣心最高、向两侧平滑收零。
+    private static func lobeWindow(_ u: CGFloat) -> CGFloat {
+        guard abs(u) < 1 else { return 0 }
+        let c = cos(u * .pi / 2)
+        return c * c
     }
 
     /// Catmull-Rom 闭合样条 → 三次贝塞尔：曲线过全部控制点、无尖角，一次成形。

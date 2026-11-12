@@ -7,6 +7,11 @@ import QuartzCore
 /// 源视频无 alpha、白底烤在画面里；alpha = smoothstep(0.031, 0.149, 1 - min(r,g,b))，
 /// 输出预乘 alpha。着色器源码内嵌字符串、运行时 makeLibrary(source:) 编译——
 /// SwiftPM 可执行文件加载独立 .metal 资源麻烦，定版不用 .metal 文件。
+/// v0.16 加径向柔边：源视频背景不是纯白、是带暗角/纹理的摄影棚渐变，
+/// 亮度抠像会把四角暗角当主体留下 → 深色壁纸上露出一块矩形残影。
+/// 亮度 alpha 再乘以画面中心为圆心的径向系数 feather（见 petFragment），
+/// 主体区（rd<0.98）不受影响、边角归零；大头特写的画面边缘会随之柔和
+/// 淡出成圆形肖像感（已与用户对齐的取舍）。
 private let petShaderSource = """
 #include <metal_stdlib>
 using namespace metal;
@@ -31,6 +36,12 @@ fragment float4 petFragment(VertexOut in [[stage_in]],
     float4 c = tex.sample(s, in.texCoord);
     float d = 1.0 - min(c.r, min(c.g, c.b));
     float a = smoothstep(0.031, 0.149, d);
+    // 径向柔边（v0.16）：抠掉摄影棚背景的暗角/纹理残留。
+    // rd 为归一化径向距离（边中点 = 1、角 ≈ 1.41）；rd<0.98 的主体区
+    // feather 恒为 1、完全不受影响，越靠边角越透明、角上归零。
+    float rd = length((in.texCoord - 0.5) * 2.0);
+    float feather = 1.0 - smoothstep(0.98, 1.38, rd);
+    a *= feather;
     if (a <= 0.001) discard_fragment();
     return float4(c.rgb * a, a);
 }
@@ -92,6 +103,7 @@ final class PetVideoRenderer: NSObject, MTKViewDelegate {
         if mode == .metal, let ctx = metalContext {
             ctx.view.delegate = self
             PetLog.d("渲染器就绪 mode=metal")
+            PetLog.d("渲染参数：亮度抠像 smoothstep(0.031, 0.149, 1-minRGB)，径向柔边 feather=1-smoothstep(0.98, 1.38, rd)（v0.16）")
         } else if let fallbackView = contentView as? PetFallbackView {
             let layer = AVPlayerLayer(player: player)
             layer.videoGravity = .resize
