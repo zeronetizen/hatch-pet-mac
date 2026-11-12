@@ -457,7 +457,7 @@ final class SettingsWindowController: NSObject {
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
             let ok: Bool
             if fm.fileExists(atPath: "/usr/bin/ditto") {
-                ok = runTool("/usr/bin/ditto", ["-c", "-k", "--keepParent", pkgDir.path, dest.path])
+                ok = runTool("/usr/bin/ditto", ["-c", "-k", "--keepParent", "--norsrc", pkgDir.path, dest.path])
             } else {
                 ok = runTool("/usr/bin/zip", ["-r", dest.path, "relay-channel-setup"], currentDir: staging.path)
             }

@@ -6,9 +6,15 @@ private final class BubbleView: NSView {
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
-/// 状态消息气泡：贴宠物窗口上方居中的小面板，6 秒自动消失、点击立即消失。
+/// 状态消息气泡：贴宠物窗口上方居中的独立小面板（不占宠物窗、不被其边界裁剪），
+/// 文本多行折行（总宽 ≤240、最多 3 行、尾部省略号），按行数 6/8/10 秒自动消失、点击立即消失。
 /// 宠物拖动结束/尺寸变化时由 AppDelegate 调 repositionIfVisible 跟随。
 final class BubbleController {
+    /// 气泡最大总宽（pt）；四边内边距 10 → 内容最大宽 = 240 - 20 = 220。
+    private static let maxBubbleWidth: CGFloat = 240
+    private static let bubblePadding: CGFloat = 10
+    private static let maxLines = 3
+
     private var panel: NSPanel?
     private var label: NSTextField?
     private var hideTimer: Timer?
@@ -21,19 +27,31 @@ final class BubbleController {
         let panel = ensurePanel()
         guard let label = self.label else { return }
         label.stringValue = message
-        // 宽度：最大内容宽 236（气泡总宽 ≤260，左右各 12 内边距）
-        label.frame = NSRect(x: 12, y: 10, width: 236, height: 10)
-        label.sizeToFit()
-        let contentW = max(label.frame.width, 40)
-        let contentH = label.frame.height
-        label.frame = NSRect(x: 12, y: 10, width: contentW, height: contentH)
-        panel.setContentSize(NSSize(width: contentW + 24, height: contentH + 20))
+        // 显式测折行尺寸：label.sizeToFit() 对长文本会量成单行宽（真机实测气泡拉成横条），
+        // 所以按内容最大宽用 boundingRect 自己算行数与实际宽高。
+        let font = label.font ?? .systemFont(ofSize: 13)
+        let maxContentW = Self.maxBubbleWidth - Self.bubblePadding * 2
+        let bound = (message as NSString).boundingRect(
+            with: NSSize(width: maxContentW, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font])
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+        let rawLines = Int(ceil(bound.height / lineHeight))
+        let lines = min(Self.maxLines, max(1, rawLines))
+        let contentW = max(ceil(bound.width), 40)          // 短消息仍是小气泡，宽取实际文本宽
+        let contentH = ceil(lineHeight * CGFloat(lines))   // 高度随行数增长（封顶 3 行）
+        label.frame = NSRect(x: Self.bubblePadding, y: Self.bubblePadding,
+                             width: contentW, height: contentH)
+        panel.setContentSize(NSSize(width: contentW + Self.bubblePadding * 2,
+                                    height: contentH + Self.bubblePadding * 2))
         position(panel: panel, anchor: anchor)
         panel.orderFrontRegardless()
-        PetLog.d("气泡显示 message=\"\(message)\" size=\(Int(contentW + 24))x\(Int(contentH + 20))")
+        // 显示时长随行数：1 行 6 秒 / 2 行 8 秒 / 3 行 10 秒
+        let duration: TimeInterval = lines <= 1 ? 6.0 : (lines == 2 ? 8.0 : 10.0)
+        PetLog.d("气泡显示 lines=\(lines) duration=\(Int(duration))s size=\(Int(contentW + Self.bubblePadding * 2))x\(Int(contentH + Self.bubblePadding * 2)) message=\"\(message)\"")
         hideTimer?.invalidate()
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
-            self?.hide(reason: "6 秒到时自动")
+        hideTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+            self?.hide(reason: "到时自动（\(Int(duration)) 秒）")
         }
     }
 
@@ -79,8 +97,8 @@ final class BubbleController {
         label.font = .systemFont(ofSize: 13)
         label.textColor = .labelColor
         label.lineBreakMode = .byWordWrapping
-        label.maximumNumberOfLines = 0
-        label.preferredMaxLayoutWidth = 236
+        label.maximumNumberOfLines = Self.maxLines   // 超过 3 行尾部省略号截断
+        label.preferredMaxLayoutWidth = Self.maxBubbleWidth - Self.bubblePadding * 2
         view.addSubview(label)
         p.contentView = view
 
