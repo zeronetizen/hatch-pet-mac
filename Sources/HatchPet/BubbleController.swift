@@ -63,17 +63,18 @@ private final class BubbleView: NSView {
 /// 文本多行折行（内容最大宽 200、最多 3 行、尾部省略号），按行数 6/8/10 秒自动消失、点击立即消失。
 /// 宠物拖动结束/尺寸变化时由 AppDelegate 调 repositionIfVisible 跟随。
 final class BubbleController {
-    /// 文字安全区最大宽（pt）：云团内圈不规则，文字只放中心安全区，故从旧版 220 收到 200。
-    private static let maxContentWidth: CGFloat = 200
+    /// 文字安全区最大宽（pt）：v0.17 为 200；v0.18 思想云整体 ×0.85 缩小，
+    /// 安全区同步缩到 170（其余几何常量同比例，见 corePadX/corePadY/dots）。
+    private static let maxContentWidth: CGFloat = 170
     private static let maxLines = 3
     /// 核心椭圆相对文字的留白：半轴 = 文字半宽 + 34 / 文字半高 + 46。
     /// 纵向留白 v0.16 由 28 提到 46（缘由见文件头 wave=v4 注）：云团长宽比
     /// 收到约 1.7，上沿瓣形起伏才有纵向空间被读成「云」；瓣与鞍都在核心
     /// 椭圆轮廓之外或之上，文字四角始终在云内。
-    private static let corePadX: CGFloat = 34
-    private static let corePadY: CGFloat = 46
-    /// 圆点串占高：云下间隙 6 + 大圆直径 10 + 间隙 5 + 小圆直径 7 + 底部余量 2 = 30。
-    private static let dotsZoneHeight: CGFloat = 30
+    private static let corePadX: CGFloat = 28.9   // v0.17 的 34 × 0.85
+    private static let corePadY: CGFloat = 39.1   // v0.17 的 46 × 0.85
+    /// 圆点串占高：v0.17 为 30，v0.18 ×0.85 = 25.5。
+    private static let dotsZoneHeight: CGFloat = 25.5
 
     /// 一次 show 的布局（全部按正常朝向：云在上、圆点在下；坐标为视图坐标系）。
     private struct Layout {
@@ -128,7 +129,7 @@ final class BubbleController {
         }
         // 显示时长随行数：1 行 6 秒 / 2 行 8 秒 / 3 行 10 秒
         let duration: TimeInterval = lines <= 1 ? 6.0 : (lines == 2 ? 8.0 : 10.0)
-        PetLog.d("气泡显示 shape=cloud wave=v5 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
+        PetLog.d("气泡显示 shape=cloud wave=v5 scale=0.85 lines=\(lines) duration=\(Int(duration))s size=\(Int(layout.panelSize.width))x\(Int(layout.panelSize.height)) message=\"\(message)\"")
         hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             self?.hide(reason: "到时自动（\(Int(duration)) 秒）")
@@ -246,7 +247,7 @@ final class BubbleController {
         let b = contentH / 2 + corePadY
         let path = closedSplinePath(through: cloudOutlinePoints(a: a, b: b))
         let bounds = path.bounds
-        let margin: CGFloat = 8
+        let margin: CGFloat = 6.8   // v0.17 的 8 × 0.85
         let cloudW = bounds.width + margin
         let cloudH = bounds.height + margin
         let panelSize = NSSize(width: cloudW, height: cloudH + dotsZoneHeight)
@@ -256,9 +257,10 @@ final class BubbleController {
         path.transform(using: AffineTransform(translationByX: dx, byY: dy))
         let center = NSPoint(x: bounds.midX + dx, y: bounds.midY + dy)
         // 圆点串：自云团下沿向下，半径 5 → 3.5 递减，略向左（宠物头顶方向）漂移
+        // 圆点位置与半径均为 v0.17 数值 ×0.85（5→4.25、3.5→2.975 等）
         let dots: [(center: NSPoint, radius: CGFloat)] = [
-            (center: NSPoint(x: center.x - 5, y: dotsZoneHeight - 11), radius: 5),
-            (center: NSPoint(x: center.x - 10, y: dotsZoneHeight - 24.5), radius: 3.5),
+            (center: NSPoint(x: center.x - 4.25, y: dotsZoneHeight - 9.35), radius: 4.25),
+            (center: NSPoint(x: center.x - 8.5, y: dotsZoneHeight - 20.825), radius: 2.975),
         ]
         let labelFrame = NSRect(x: center.x - contentW / 2, y: center.y - contentH / 2,
                                 width: contentW, height: contentH)
@@ -313,7 +315,7 @@ final class BubbleController {
         view.onClick = { [weak self] in self?.hide(reason: "点击") }
 
         let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 13)
+        label.font = .systemFont(ofSize: 11)   // v0.18 随云整体 ×0.85（原 13）
         label.textColor = .labelColor
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = Self.maxLines   // 超过 3 行尾部省略号截断

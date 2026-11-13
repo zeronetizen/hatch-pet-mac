@@ -1,0 +1,396 @@
+import AppKit
+
+/// 首启引导窗（v0.18）：未配置通道+钥时由 AppDelegate 弹出，设置里也可经
+/// 「重新走引导」再开。打开即 GET /status 分流：
+/// - open → 领取面板（导出领取 skill 包 + 配对串粘贴连接）
+/// - full → bot 面板（跳 @hatchPetBot + 兑换码/Telegram ID 兑换）
+/// - 查失败 → 提示重试，配对串粘贴与自建面板仍可用，不堵死
+/// 两态常显自建面板（邮箱 → 生成带 pet-owner.json 的自建 skill 包）。
+/// 连接成功 = 落盘配置 + 存钥 + 回调 AppDelegate 重启轮询，随后关窗。
+final class OnboardingWindowController: NSObject {
+    var onConnected: (() -> Void)?
+
+    private var window: NSWindow?
+    private var statusLine: NSTextField!
+    private var retryButton: NSButton!
+    private var claimGroup: NSView!
+    private var claimText: NSTextField!
+    private var botGroup: NSView!
+    private var codeField: NSTextField!
+    private var tgField: NSTextField!
+    private var pairingField: NSTextField!
+    private var emailField: NSTextField!
+    private var feedback: NSTextField!
+    private var actionButtons: [NSButton] = []
+
+    func show() {
+        let win = ensureWindow()
+        win.center()
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
+        PetLog.d("[onboarding] 引导窗打开，开始查 /status 分流")
+        fetchStatus()
+    }
+
+    // MARK: - 构建（固定布局，手动 frame，与设置窗同一套路）
+
+    private func ensureWindow() -> NSWindow {
+        if let window { return window }
+        let W: CGFloat = 560, H: CGFloat = 580
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+                           styleMask: [.titled, .closable],
+                           backing: .buffered, defer: false)
+        win.title = "HatchPet 引导"
+        win.isReleasedWhenClosed = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        win.contentView = content
+        let X: CGFloat = 20, FW: CGFloat = W - 40
+        var cursor = H - 20
+
+        let title = NSTextField(labelWithString: "欢迎使用 HatchPet")
+        title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.frame = NSRect(x: X, y: cursor - 24, width: FW, height: 24)
+        content.addSubview(title)
+        cursor -= 32
+        let intro = NSTextField(labelWithString: "这只宠物会显示你的智能体正在干什么。它需要一条中转通道才能收到状态，下面选一条路拿到通道即可。")
+        intro.font = .systemFont(ofSize: 12)
+        intro.lineBreakMode = .byWordWrapping
+        intro.maximumNumberOfLines = 2
+        intro.frame = NSRect(x: X, y: cursor - 30, width: FW, height: 30)
+        content.addSubview(intro)
+        cursor -= 38
+
+        statusLine = NSTextField(labelWithString: "正在查询公共中转名额…")
+        statusLine.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLine.frame = NSRect(x: X, y: cursor - 18, width: FW - 90, height: 18)
+        content.addSubview(statusLine)
+        retryButton = NSButton(title: "重试", target: self, action: #selector(fetchStatusTapped))
+        retryButton.bezelStyle = .rounded
+        retryButton.frame = NSRect(x: X + FW - 80, y: cursor - 24, width: 80, height: 26)
+        retryButton.isHidden = true
+        content.addSubview(retryButton)
+        cursor -= 28
+
+        // 主面板区（领取 / bot 两组同框，按分流结果切换可见性）
+        let groupFrame = NSRect(x: X, y: cursor - 148, width: FW, height: 148)
+        claimGroup = NSView(frame: groupFrame)
+        botGroup = NSView(frame: groupFrame)
+        content.addSubview(claimGroup)
+        content.addSubview(botGroup)
+        // 领取组
+        claimText = NSTextField(labelWithString: "")
+        claimText.font = .systemFont(ofSize: 13, weight: .medium)
+        claimText.lineBreakMode = .byWordWrapping
+        claimText.maximumNumberOfLines = 2
+        claimText.frame = NSRect(x: 0, y: 106, width: FW, height: 36)
+        claimGroup.addSubview(claimText)
+        let claimBtn = NSButton(title: "导出领取 skill 包", target: self, action: #selector(exportClaim))
+        claimBtn.bezelStyle = .rounded
+        claimBtn.frame = NSRect(x: 0, y: 66, width: 170, height: 28)
+        claimGroup.addSubview(claimBtn)
+        actionButtons.append(claimBtn)
+        let claimHint = NSTextField(labelWithString: "把导出的包交给你的智能体，它领到通道后会给你一串配对串，粘到下方配对串框点「连接」即可。")
+        claimHint.font = .systemFont(ofSize: 11)
+        claimHint.textColor = .secondaryLabelColor
+        claimHint.lineBreakMode = .byWordWrapping
+        claimHint.maximumNumberOfLines = 3
+        claimHint.frame = NSRect(x: 0, y: 6, width: FW, height: 44)
+        claimGroup.addSubview(claimHint)
+        // bot 组
+        let botText = NSTextField(labelWithString: "免费名额已领完。去宠物 bot 做几个小任务，就能领一个兑换码：")
+        botText.font = .systemFont(ofSize: 13, weight: .medium)
+        botText.lineBreakMode = .byWordWrapping
+        botText.maximumNumberOfLines = 2
+        botText.frame = NSRect(x: 0, y: 106, width: FW, height: 36)
+        botGroup.addSubview(botText)
+        let botBtn = NSButton(title: "去 Telegram 领取", target: self, action: #selector(openBot))
+        botBtn.bezelStyle = .rounded
+        botBtn.frame = NSRect(x: 0, y: 70, width: 160, height: 28)
+        botGroup.addSubview(botBtn)
+        actionButtons.append(botBtn)
+        codeField = NSTextField(frame: NSRect(x: 0, y: 34, width: 168, height: 24))
+        codeField.placeholderString = "兑换码（12 位）"
+        botGroup.addSubview(codeField)
+        tgField = NSTextField(frame: NSRect(x: 178, y: 34, width: 168, height: 24))
+        tgField.placeholderString = "Telegram 数字 ID"
+        botGroup.addSubview(tgField)
+        let redeemBtn = NSButton(title: "兑换", target: self, action: #selector(redeem))
+        redeemBtn.bezelStyle = .rounded
+        redeemBtn.frame = NSRect(x: 356, y: 32, width: 90, height: 28)
+        botGroup.addSubview(redeemBtn)
+        actionButtons.append(redeemBtn)
+        let botHint = NSTextField(labelWithString: "数字 ID 在 bot 发码的消息里有注明，照抄填入；兑换成功会自动连接。")
+        botHint.font = .systemFont(ofSize: 11)
+        botHint.textColor = .secondaryLabelColor
+        botHint.frame = NSRect(x: 0, y: 8, width: FW, height: 16)
+        botGroup.addSubview(botHint)
+        claimGroup.isHidden = true
+        botGroup.isHidden = true
+        cursor -= 156
+
+        // 配对串（两态常显，三路共同收尾）
+        let pairLabel = NSTextField(labelWithString: "配对串")
+        pairLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        pairLabel.frame = NSRect(x: X, y: cursor - 18, width: 120, height: 18)
+        content.addSubview(pairLabel)
+        cursor -= 24
+        pairingField = NSTextField(frame: NSRect(x: X, y: cursor - 24, width: FW - 120, height: 24))
+        pairingField.placeholderString = "hatchpet1:…（粘贴整串）"
+        content.addSubview(pairingField)
+        let connectBtn = NSButton(title: "连接", target: self, action: #selector(connectFromPairing))
+        connectBtn.bezelStyle = .rounded
+        connectBtn.frame = NSRect(x: X + FW - 110, y: cursor - 26, width: 110, height: 28)
+        content.addSubview(connectBtn)
+        actionButtons.append(connectBtn)
+        cursor -= 36
+
+        let sep = NSBox(frame: NSRect(x: X, y: cursor - 2, width: FW, height: 1))
+        sep.boxType = .separator
+        content.addSubview(sep)
+        cursor -= 12
+
+        // 自建面板（两态常显，弱化）
+        let selfTitle = NSTextField(labelWithString: "自建中转（可选）")
+        selfTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        selfTitle.frame = NSRect(x: X, y: cursor - 18, width: 200, height: 18)
+        content.addSubview(selfTitle)
+        cursor -= 26
+        emailField = NSTextField(frame: NSRect(x: X, y: cursor - 24, width: FW - 190, height: 24))
+        emailField.placeholderString = "你的邮箱（用于注册/登录 Cloudflare）"
+        content.addSubview(emailField)
+        let genBtn = NSButton(title: "生成自建 skill 包", target: self, action: #selector(exportSelfhost))
+        genBtn.bezelStyle = .rounded
+        genBtn.frame = NSRect(x: X + FW - 180, y: cursor - 26, width: 180, height: 28)
+        content.addSubview(genBtn)
+        actionButtons.append(genBtn)
+        cursor -= 34
+        let selfNote = NSTextField(labelWithString: "数据存在你自己的 Cloudflare、不占公共名额。把生成的包交给你的智能体，它会凭邮箱引导你完成部署；部署完把配对串粘回上面即可。")
+        selfNote.font = .systemFont(ofSize: 11)
+        selfNote.textColor = .secondaryLabelColor
+        selfNote.lineBreakMode = .byWordWrapping
+        selfNote.maximumNumberOfLines = 3
+        selfNote.frame = NSRect(x: X, y: cursor - 40, width: FW, height: 40)
+        content.addSubview(selfNote)
+        cursor -= 48
+
+        feedback = NSTextField(labelWithString: "")
+        feedback.font = .systemFont(ofSize: 12)
+        feedback.lineBreakMode = .byWordWrapping
+        feedback.maximumNumberOfLines = 2
+        feedback.frame = NSRect(x: X, y: cursor - 32, width: FW - 110, height: 32)
+        content.addSubview(feedback)
+        let closeBtn = NSButton(title: "关闭", target: self, action: #selector(closeTapped))
+        closeBtn.bezelStyle = .rounded
+        closeBtn.frame = NSRect(x: X + FW - 100, y: cursor - 34, width: 100, height: 30)
+        content.addSubview(closeBtn)
+
+        self.window = win
+        return win
+    }
+
+    @objc private func closeTapped() { window?.close() }
+    @objc private func fetchStatusTapped() { fetchStatus() }
+
+    private func setActionsEnabled(_ on: Bool) {
+        actionButtons.forEach { $0.isEnabled = on }
+    }
+
+    // MARK: - /status 分流
+
+    private func fetchStatus() {
+        let cfg = ChannelSettings.load()
+        let base = cfg.baseURL
+        statusLine.stringValue = "正在查询公共中转名额…"
+        retryButton.isHidden = true
+        claimGroup.isHidden = true
+        botGroup.isHidden = true
+        PetLog.d("[onboarding] GET \(base)/status 查名额分流")
+        guard let url = URL(string: "\(base)/status") else {
+            statusLine.stringValue = "服务器地址格式不对，无法查询名额。"
+            retryButton.isHidden = false
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        let session = RelaySession.makeSession(proxy: cfg.proxy)
+        session.dataTask(with: request) { [weak self] data, response, error in
+            session.finishTasksAndInvalidate()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
+                guard error == nil, http == 200, let data,
+                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let state = obj["state"] as? String else {
+                    self.statusLine.stringValue = "查不到名额状态（\(error?.localizedDescription ?? "HTTP \(http)")）。网络恢复后点重试；已有配对串可以直接粘到下面连接。"
+                    self.retryButton.isHidden = false
+                    PetLog.d("[onboarding] /status 失败 http=\(http) err=\(error?.localizedDescription ?? "-")（降级：配对串/自建仍可用）")
+                    return
+                }
+                let left = (obj["free_left"] as? NSNumber)?.intValue ?? 0
+                if state == "open" {
+                    self.statusLine.stringValue = "公共中转：有名额"
+                    self.claimText.stringValue = "公共中转还有免费名额（剩余 \(left) 个），用领取 skill 让智能体帮你领一条："
+                    self.claimGroup.isHidden = false
+                    PetLog.d("[onboarding] 分流=open free_left=\(left)，显示领取面板")
+                } else {
+                    self.statusLine.stringValue = "公共中转：已满员"
+                    self.botGroup.isHidden = false
+                    PetLog.d("[onboarding] 分流=full，显示 bot 面板")
+                }
+            }
+        }.resume()
+    }
+
+    // MARK: - 领取 / 自建导出
+
+    @objc private func exportClaim() {
+        PetLog.d("[onboarding] 导出领取 skill 包")
+        feedback.stringValue = SkillExport.export(package: "pet-claim",
+                                                  suggestedName: "pet-claim-skill.zip")
+    }
+
+    @objc private func exportSelfhost() {
+        let email = emailField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard email.contains("@"), email.contains("."), !email.contains(" ") else {
+            feedback.stringValue = "先填一个有效的邮箱，再生成自建 skill 包。"
+            PetLog.d("[onboarding] 自建导出拦截：邮箱格式不对")
+            return
+        }
+        let ownerObj: [String: Any] = ["email": email]
+        let ownerData = try! JSONSerialization.data(withJSONObject: ownerObj, options: [.sortedKeys])
+        let ownerText = String(data: ownerData, encoding: .utf8)! + "\n"
+        PetLog.d("[onboarding] 生成自建 skill 包（pet-owner.json 写邮箱，邮箱原文不记日志）")
+        feedback.stringValue = SkillExport.export(package: "relay-channel-setup",
+                                                  suggestedName: "relay-channel-setup-skill.zip",
+                                                  extraFiles: ["pet-owner.json": ownerText])
+    }
+
+    @objc private func openBot() {
+        PetLog.d("[onboarding] 打开 https://t.me/hatchPetBot")
+        NSWorkspace.shared.open(URL(string: "https://t.me/hatchPetBot")!)
+    }
+
+    // MARK: - 兑换
+
+    @objc private func redeem() {
+        let code = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tgId = tgField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, !tgId.isEmpty, tgId.allSatisfy({ $0.isNumber }) else {
+            feedback.stringValue = "请把兑换码和 Telegram 数字 ID 都填好（ID 是纯数字）。"
+            PetLog.d("[onboarding] 兑换拦截：字段不完整 code空=\(code.isEmpty) tg空=\(tgId.isEmpty)")
+            return
+        }
+        let cfg = ChannelSettings.load()
+        let base = cfg.baseURL
+        guard let url = URL(string: "\(base)/redeem") else { return }
+        PetLog.d("[onboarding] POST \(base)/redeem codeLen=\(code.count)（码与 ID 不记日志）")
+        setActionsEnabled(false)
+        feedback.stringValue = "兑换中…"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["code": code, "tgId": tgId]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let session = RelaySession.makeSession(proxy: cfg.proxy)
+        session.dataTask(with: request) { [weak self] data, response, error in
+            session.finishTasksAndInvalidate()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setActionsEnabled(true)
+                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
+                if let error {
+                    self.feedback.stringValue = "兑换失败：\(error.localizedDescription)"
+                    PetLog.d("[onboarding] 兑换网络错误：\(error.localizedDescription)")
+                    return
+                }
+                let obj = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+                if http == 201, let channel = obj?["channel"] as? String,
+                   let key = obj?["key"] as? String, !channel.isEmpty, !key.isEmpty {
+                    PetLog.d("[onboarding] 兑换成功 channel=\(channel) keyLen=\(key.count)，自动走连接流程")
+                    self.applyConnection(server: base, channel: channel, key: key, source: "redeem")
+                    return
+                }
+                let errCode = obj?["error"] as? String ?? ""
+                self.feedback.stringValue = Self.redeemErrorText(errCode, http: http,
+                                                                 channel: obj?["channel"] as? String)
+                PetLog.d("[onboarding] 兑换失败 http=\(http) error=\(errCode)")
+            }
+        }.resume()
+    }
+
+    /// PROTOCOL /redeem 错误码 → 人话
+    static func redeemErrorText(_ code: String, http: Int, channel: String?) -> String {
+        switch code {
+        case "code_not_found": return "兑换失败：这个码不存在或已经被用掉了，回 bot 核对或重新领一个。"
+        case "code_expired": return "兑换失败：兑换码已过期（有效期 24 小时），回 bot 重新领一个新码。"
+        case "code_revoked": return "兑换失败：这个码已被作废，回 bot 重新领一个。"
+        case "tg_mismatch": return "兑换失败：这个码不是发给这个 Telegram ID 的——ID 照 bot 发码消息里注明的那个填。"
+        case "already_claimed": return "这个 Telegram 账号已经领过通道了（一号一领）\(channel.map { "：\($0)" } ?? "")。请用当初的配对串连接，或在设置里手填那条通道。"
+        case "rate_limited": return "兑换失败：太频繁了，过一会儿再试。"
+        case "busy": return "兑换失败：服务器繁忙，过一会儿再试。"
+        case "bad_request", "bad_json": return "兑换失败：兑换码或 ID 格式不对，核对后重试。"
+        case "too_large": return "兑换失败：请求异常（too_large），请重试。"
+        default: return "兑换失败：服务器返回 HTTP \(http)\(code.isEmpty ? "" : "（\(code)）")。"
+        }
+    }
+
+    // MARK: - 配对串连接（共同收尾）
+
+    @objc private func connectFromPairing() {
+        let raw = pairingField.stringValue
+        guard let parsed = PairingString.parse(raw) else {
+            feedback.stringValue = "配对串不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
+            PetLog.d("[onboarding] 配对串连接拦截：解码/校验未过")
+            return
+        }
+        applyConnection(server: parsed.server, channel: parsed.channel, key: parsed.key, source: "pairing")
+    }
+
+    /// 落盘 + 存钥 + 测连接：GET /c/<channel> 回 200/204 即连接成功，
+    /// 保存配置、回调重启轮询、关窗；401 等失败只提示不落盘。
+    private func applyConnection(server: String, channel: String, key: String, source: String) {
+        PetLog.d("[onboarding] 连接流程 source=\(source) server=\(server) channel=\(channel) keyLen=\(key.count)")
+        setActionsEnabled(false)
+        feedback.stringValue = "连接测试中…"
+        guard let url = URL(string: "\(server)/c/\(channel)") else {
+            setActionsEnabled(true)
+            feedback.stringValue = "连接失败：服务器地址格式不对。"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let cfg = ChannelSettings.load()
+        let session = RelaySession.makeSession(proxy: cfg.proxy)
+        session.dataTask(with: request) { [weak self] _, response, error in
+            session.finishTasksAndInvalidate()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setActionsEnabled(true)
+                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
+                if let error {
+                    self.feedback.stringValue = "连接失败：\(error.localizedDescription)"
+                    PetLog.d("[onboarding] 连接测试网络错误：\(error.localizedDescription)")
+                    return
+                }
+                guard http == 200 || http == 204 else {
+                    self.feedback.stringValue = http == 401
+                        ? "连接失败：钥不对或通道不存在（HTTP 401），核对配对串后重试。"
+                        : "连接失败：服务器返回 HTTP \(http)。"
+                    PetLog.d("[onboarding] 连接测试失败 http=\(http)（未落盘）")
+                    return
+                }
+                var newCfg = cfg
+                newCfg.server = server
+                newCfg.channel = channel
+                ChannelSettings.save(newCfg)
+                KeyFileStore.save(key: key, channel: channel)
+                PetLog.d("[onboarding] 连接成功并已落盘 server=\(server) channel=\(channel)，回调重启轮询")
+                self.feedback.stringValue = "已连接通道「\(channel)」，宠物开始接收状态。"
+                self.onConnected?()
+                self.window?.close()
+            }
+        }.resume()
+    }
+}

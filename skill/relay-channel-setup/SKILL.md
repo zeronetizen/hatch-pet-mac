@@ -170,3 +170,37 @@ RELAY_URL=<server_url> node relay.mjs write <channel> '<json>' --hmac
   log 模式回 `{seq, items:[...]}` 增量列表。
 - 错误码：401 钥不对/缺失，403 签名问题，404 通道不存在，409 条件写冲突，
   413 超 64KB，429 超限频。
+
+## HatchPet 自建变体（带邮箱）
+
+当这个包是 HatchPet App 的自建面板导出的（包内带 `pet-owner.json`，模板见
+`pet-owner.json.example`）时，目标不是通用通道，而是：替用户在他自己的
+Cloudflare 上部署一套 relay、建第一条通道、把配对串给他粘回 HatchPet App。
+流程如下：
+
+1. **读邮箱**：读包根目录的 `pet-owner.json`，取 `email` 字段。这是用户在
+   App 自建面板填的邮箱，用作他 Cloudflare 账号的邮箱。没有这个文件就按
+   上面的通用流程走，不进本变体。
+2. **登录或注册 Cloudflare**：先按该邮箱引导走 Cloudflare 登录；没有账号
+   就转注册流程，用该邮箱注册。**验证邮箱、设置密码这两个环节必须停下，
+   让用户本人完成**——密码由用户自己在 Cloudflare 页面上设定，不经过你、
+   不进 skill 包、不写进任何文件。账号就绪后，再按本 skill 既定的安全
+   凭证流程拿到部署所需的 API token（见上文前置条件第 3 条），不要让用户
+   把 token 明文贴给你。
+3. **部署 relay**：按上文「执行步骤」原样部署（Worker + Durable Objects、
+   主钥落本机 `keys/`），服务地址形如 `https://relay.<子域>.workers.dev`。
+4. **建第一条通道**：用 `relay-admin.mjs create` 建一条 **state 模式**通道
+   （通道名可用 `hatch-pet`），accesskey 由脚本落进本机 `keys/`，不要回显。
+5. **组装配对串给用户**：把三件套组装成与 pet-claim 同格式的配对串：
+
+   ```
+   hatchpet1: + base64url(JSON {"v":1,"server":<你的服务地址>,"channel":<通道名>,"key":<accesskey>})
+   ```
+
+   accesskey 从本机 `keys/<通道名>.key` 读出、只在内存里组装这一串，不要
+   把钥单独打印或落盘到别处。把配对串整串交给用户，告诉他：打开
+   HatchPet App，粘进引导页/设置里的配对框，点连接即可。配对串按凭证
+   对待，不写进任何仓库或日志文件。
+6. **验收**：按上文「验收方法」自测读写通过后，再把配对串交给用户；
+   然后引导用户的智能体按 relay 的宠物状态协议开始往这条通道写状态
+   （协议见上文「宠物状态协议」一节）。

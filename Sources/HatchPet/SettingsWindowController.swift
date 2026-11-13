@@ -1,7 +1,8 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// 设置窗口：通道服务器 / 通道名 / accesskey（本机钥文件）/ 轮询间隔 / 代理 + 测试连接 + 导出 skill 包 + 详细说明。
+/// 设置窗口：通道服务器 / 通道名 / accesskey（本机钥文件）/ 轮询间隔 / 代理 + 测试连接 + 配对串 + 导出 skill 包。
+/// v0.18：撤「注册新通道」（领取走引导/skill），配对块升级为 hatchpet1: 配对串；说明只留一行短提示 + 落地页链接。
 /// 服务器、通道名、间隔存 UserDefaults；accesskey 只存本机钥文件（权限 600，见 KeyFileStore），不用系统钥匙串。
 /// v0.15 起全量即时生效（macOS 系统设置风格，无「保存」按钮）：开关/下拉变更即落盘
 /// 应用；文本框在编辑结束（回车或失焦）时落盘应用。每次应用后经 onApplied 回调让
@@ -11,13 +12,15 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     var onApplied: (() -> Void)?
     /// 某状态的形象被替换/恢复时回调（AppDelegate 据此让正在播该状态的播放器立即重载）
     var onAssetsChanged: ((PetState) -> Void)?
+    /// 「重新走引导」点击回调（AppDelegate 据此打开引导窗）
+    var onReopenOnboarding: (() -> Void)?
 
     private var window: NSWindow?
     private var serverField: NSTextField!
     private var channelField: NSTextField!
     private var keyField: NSSecureTextField!
     private var keyHint: NSTextField!
-    private var registerButton: NSButton!
+    private var pairingField: NSTextField!
     private var copyPairingButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
@@ -35,43 +38,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 最近一次已应用的字段快照（关窗时若与当前字段不一致，自动提交一次防丢失）
     private var appliedSnapshot: String?
 
-    private static let helpText = """
-    【先说清：本页没有保存按钮】
-    所有改动即时生效：开关、下拉、按钮一点即生效；文本框（服务器地址、通道名、accesskey、代理主机/端口）在按回车或点到别处时生效。状态行会回一句「已生效：…」。关窗不回滚——关掉窗口，已生效的改动保留。
-
-    【每个字段是什么】
-    · 服务器地址：通道服务的地址。宠物定时到这个地址读取最新状态。本应用不直连任何其他服务器。
-    · 通道名：服务器上的一条通道，相当于一个专属信箱。写入方（例如你的 Muse）和这只宠物用同一个通道名对上头。
-    · accesskey：这条通道的钥匙，读写共用同一把。保存在本机应用数据目录的文件中（~/Library/Application Support/HatchPet/keys/<通道名>.key，目录权限 700、文件权限 600），不进系统钥匙串（避免权限弹窗），不写进应用、不打包分发、不上传到任何地方（只在向上面填写的服务器请求时作为身份凭证发送）。注：v0.5 及以前版本把钥存在系统钥匙串里，v0.6 起改存上述文件，旧钥不会自动迁移，升级后在设置里重填一次即可。
-    · 轮询间隔：多久去服务器看一次新状态。越短越实时、流量越大；15 秒对桌面宠物足够，流量和耗电都可以忽略。
-
-    【第一次用：先领一条通道】
-    在本页点「注册新通道」，应用会向当前服务器领取一条只属于你的通道和 accesskey，自动填好并即时生效，同时把「配对块」（server / channel / key 三行）复制到剪贴板。把配对块粘贴发给你的智能体（例如你的 Muse），它就能按协议往这条通道写状态，宠物随之动起来。钥只在注册时出现、服务器只存它的哈希，丢了不能找回——重新注册一条新的即可，旧通道放着不管就行。
-
-    【默认服务器是谁的】
-    默认地址 https://pet.8529527.xyz 是本项目运营的公共通道服务器。用它你需要一条自己的通道和对应的 accesskey：让你的智能体向该服务器的注册接口领取一条即可（协议见仓库根目录 PROTOCOL.md），钥只在领取时出现一次，请收好。你的宠物状态数据（就是一小段 JSON：状态、可选的一句消息、时间戳）会经过它中转。介意的话，完全可以换成你自己的服务器，见下一段。
-
-    【想用自己的服务器】
-    本仓库附带一个给 Muse 用的部署 skill：skill/relay-channel（SKILL.md + assets/ 里是服务端全部代码）。把它装进你自己的 Muse，然后对它说一句「用 skill/relay-channel 部署我自己的通道」，它会引导你在你自己的 Cloudflare 账号上一键部署一套同样的通道服务、建好第一条通道，并把新服务器的地址和 accesskey 交给你。把那两个值填回本设置页即可，之后数据只走你自己的服务器。为安全起见，部署时 Cloudflare 的 API token 走安全凭证流程，不要把任何密钥明文粘贴到聊天或文件里。
-
-    【测试连接报 TLS 错误怎么办】
-    服务器域名在某些网络下直连会被干扰，TLS 握手直接失败。这不是钥或通道填错。办法一：在你的代理客户端（如 mihomo）里把 pet.8529527.xyz 设为走代理。办法二：用本页的「代理」小节——勾选「使用代理连接服务器」，填本机代理客户端的监听地址（混合端口如 127.0.0.1:7890 选 HTTP；纯 SOCKS5 端口选 SOCKS5），勾选即时生效，轮询与测试连接都会经它出海，与系统 TUN 规则互不影响。
-
-    【没配置会怎样】
-    accesskey 清空（即时删除本机钥文件）时，通道功能关闭，宠物退回纯本地手动模式：用菜单切换状态，不联网、不轮询。
-
-    【长时间没新状态会变淡】
-    通道数据超过 20 分钟没有更新时，宠物会在随后一分钟里缓慢变淡（到 75% 不透明），表示对端暂时失联；这不是故障，也不会一步突然透明。一旦收到新数据，会立即平滑恢复全亮。
-
-    【把这条通道分享给信任的人】
-    设置页下方有「导出 skill 包」：填好 accesskey（即时存入本机钥文件）后即可用。导出的 zip 里装着部署 skill（对方的 Muse 装上它就能部署或对接通道）和一份 pet-channel.json（当前服务器地址、通道名与 accesskey）。拿到这个包的人可以读写你的这条通道——只发给信任的人，不要发到公开场合。
-
-    【自定义形象】
-    「形象」小节可为五个状态各选一个自己的视频（mp4/mov）替换内置动画，例如把官方待机的大头特写换成全身素材。选中的文件会被拷贝到 ~/Library/Application Support/HatchPet/assets/ 下长期保存（原文件之后移动/删除不影响），设置后立即生效；「恢复默认」删掉拷贝、回到内置动画。素材与内置动画走同一套实时抠像：建议正方形、白底视频，与内置素材同规格 480×480 最佳；非白底素材抠像边缘会不干净。内置的待机动画本身是特写构图，这是素材如此，不是显示被裁。
-
-    【检查更新】
-    「关于 / 更新」小节可手动检查更新；应用启动时也会每天静默自动检查一次。更新只从 GitHub 公开仓 zeronetizen/hatch-pet-mac 的 Releases 拉取（检查与下载都走本页配置的代理），下载后先校验新包版本确实更高，确认更新后应用会退出、由一个一次性助手把新版换上并自动重启——钥文件、自定义形象与设置都存在应用之外，不受影响。任何一步失败都会停在旧版并弹窗说明。
-    """
+    /// v0.18 起说明只留一行短提示，全部说明导向落地页（唯一出处）
+    private static let helpHint = "改动即时生效、无保存按钮；钥只存本机文件。完整说明看落地页："
 
     func show() {
         let window = ensureWindow()
@@ -90,7 +58,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         // 可视高时按屏幕收（下方说明区滚动高度随之变小，布局是光标驱动的、
         // 整体等比下移，不会错位）。
         let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
-        let W: CGFloat = 540, H: CGFloat = min(1060, visibleH - 16)
+        let W: CGFloat = 540, H: CGFloat = min(1000, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -143,25 +111,34 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(keyHint)
         cursor -= 24
 
-        // 注册新通道 + 复制配对块（v0.17）：没有通道时一键向当前服务器领取
-        _ = addLabel("新通道", top: cursor)
-        registerButton = NSButton(title: "注册新通道", target: self, action: #selector(registerChannel))
-        registerButton.bezelStyle = .rounded
-        registerButton.frame = NSRect(x: fieldX, y: cursor - 28, width: 130, height: 28)
-        content.addSubview(registerButton)
-        copyPairingButton = NSButton(title: "复制配对块", target: self, action: #selector(copyPairing))
+        // 配对串（v0.18，取代 v0.17「注册新通道」）：粘贴 hatchpet1: 串解码填入连接；
+        // 同行区另有复制配对串与「重新走引导」入口
+        _ = addLabel("配对串", top: cursor)
+        pairingField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 120, height: 24))
+        pairingField.placeholderString = "hatchpet1:…（粘贴整串后点连接）"
+        content.addSubview(pairingField)
+        let pairConnectBtn = NSButton(title: "连接", target: self, action: #selector(connectFromPairing))
+        pairConnectBtn.bezelStyle = .rounded
+        pairConnectBtn.frame = NSRect(x: fieldX + fieldW - 110, y: cursor - 26, width: 110, height: 28)
+        content.addSubview(pairConnectBtn)
+        cursor -= 36
+        copyPairingButton = NSButton(title: "复制配对串", target: self, action: #selector(copyPairing))
         copyPairingButton.bezelStyle = .rounded
-        copyPairingButton.frame = NSRect(x: fieldX + 140, y: cursor - 28, width: 130, height: 28)
+        copyPairingButton.frame = NSRect(x: fieldX, y: cursor - 28, width: 130, height: 28)
         content.addSubview(copyPairingButton)
-        cursor -= 32
-        let regHint = NSTextField(labelWithString: "没有通道就点「注册新通道」：向当前服务器领取一条新通道和钥、自动填好，并把配对块复制到剪贴板——粘贴发给你的智能体，它就能往这条通道写状态。已有通道时，「复制配对块」随时可再复制一份。")
-        regHint.font = .systemFont(ofSize: 11)
-        regHint.textColor = .secondaryLabelColor
-        regHint.lineBreakMode = .byWordWrapping
-        regHint.maximumNumberOfLines = 3
-        regHint.frame = NSRect(x: fieldX, y: cursor - 38, width: fieldW, height: 38)
-        content.addSubview(regHint)
-        cursor -= 44
+        let reopenBtn = NSButton(title: "重新走引导", target: self, action: #selector(reopenOnboarding))
+        reopenBtn.bezelStyle = .rounded
+        reopenBtn.frame = NSRect(x: fieldX + 140, y: cursor - 28, width: 130, height: 28)
+        content.addSubview(reopenBtn)
+        cursor -= 34
+        let pairHint = NSTextField(labelWithString: "领取、兑换、自建拿到的都是同一串配对串，粘到这里连接即可；上方三字段手填仍可作兜底。配对串含钥，只发信任对象。")
+        pairHint.font = .systemFont(ofSize: 11)
+        pairHint.textColor = .secondaryLabelColor
+        pairHint.lineBreakMode = .byWordWrapping
+        pairHint.maximumNumberOfLines = 2
+        pairHint.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
+        content.addSubview(pairHint)
+        cursor -= 34
 
         // 轮询间隔
         _ = addLabel("轮询间隔", top: cursor)
@@ -315,22 +292,27 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(updateStatusLabel)
         cursor -= 36
 
-        // 详细说明
+        // 说明（v0.18：一行短提示 + 落地页链接按钮，删去原大段说明滚动区）
+        let sep3 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
+        sep3.boxType = .separator
+        content.addSubview(sep3)
+        cursor -= 10
         let helpLabel = NSTextField(labelWithString: "说明")
         helpLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         helpLabel.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
         content.addSubview(helpLabel)
-        cursor -= 24
-        let scroll = NSScrollView(frame: NSRect(x: 20, y: 64, width: W - 40, height: cursor - 64))
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: W - 40, height: cursor - 64))
-        textView.string = Self.helpText
-        textView.isEditable = false
-        textView.font = .systemFont(ofSize: 12)
-        textView.textContainerInset = NSSize(width: 8, height: 8)
-        scroll.documentView = textView
-        content.addSubview(scroll)
+        cursor -= 26
+        let helpHintLabel = NSTextField(labelWithString: Self.helpHint)
+        helpHintLabel.font = .systemFont(ofSize: 12)
+        helpHintLabel.lineBreakMode = .byWordWrapping
+        helpHintLabel.maximumNumberOfLines = 2
+        helpHintLabel.frame = NSRect(x: fieldX, y: cursor - 28, width: fieldW - 130, height: 28)
+        content.addSubview(helpHintLabel)
+        let helpLinkBtn = NSButton(title: "查看说明", target: self, action: #selector(openHelpPage))
+        helpLinkBtn.bezelStyle = .rounded
+        helpLinkBtn.frame = NSRect(x: fieldX + fieldW - 120, y: cursor - 27, width: 120, height: 26)
+        content.addSubview(helpLinkBtn)
+        cursor -= 34
 
         // 底部按钮（v0.15 即时生效后只剩「关闭」：关窗不回滚，已生效的改动保留；
         // 不给回车等价键——回车留给文本框提交编辑）
@@ -626,7 +608,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
                 let seq = (obj["seq"] as? NSNumber)?.intValue ?? 0
                 var stateText = "（通道暂无数据）"
                 var timeText = ""
-                if let payload = obj["data"] as? [String: Any] {
+                if let payload = (obj["payload"] ?? obj["data"]) as? [String: Any] {
                     if let s = payload["state"] as? String { stateText = "状态 \(s)" }
                     if let ts = (payload["ts"] as? NSNumber)?.doubleValue {
                         timeText = "，数据时间 \(Self.timeString(ms: ts))"
@@ -638,75 +620,48 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         }.resume()
     }
 
-    // MARK: - 注册新通道 / 配对块（v0.17）
+    // MARK: - 配对串（v0.18，取代 v0.17 注册新通道 / 三行配对块）
 
-    /// 向当前服务器 POST /register 领取一条新通道：成功后自动填服务器/通道/钥
-    /// 三个字段并即时应用（钥经既有 persistKey 落盘本机文件），配对块自动复制
-    /// 到剪贴板。日志只记通道名与钥长度，绝不记钥原文。
-    @objc private func registerChannel() {
-        let base = currentServerBase()
-        guard let url = URL(string: "\(base)/register") else {
-            statusLabel.stringValue = "注册失败：服务器地址格式不对。"
-            PetLog.d("注册未执行：服务器地址格式不对 base=\(base)")
-            return
-        }
-        registerButton.isEnabled = false
-        statusLabel.stringValue = "正在向 \(base) 注册新通道…"
-        PetLog.d("注册新通道 POST \(base)/register")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data("{}".utf8)
-        let session = RelaySession.makeSession(proxy: proxyFromFields())
-        session.dataTask(with: request) { [weak self] data, response, error in
-            session.finishTasksAndInvalidate()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.registerButton.isEnabled = true
-                if let error {
-                    self.statusLabel.stringValue = "注册失败：\(error.localizedDescription)"
-                    PetLog.d("注册网络错误：\(error.localizedDescription)")
-                    return
-                }
-                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
-                guard http == 201, let data,
-                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                      let channel = obj["channel"] as? String, !channel.isEmpty,
-                      let key = obj["key"] as? String, !key.isEmpty else {
-                    self.statusLabel.stringValue = http == 429
-                        ? "注册失败：太频繁了（服务器限频），过一会儿再试。"
-                        : "注册失败：服务器返回 HTTP \(http)（这个服务器可能不支持自助注册）。"
-                    PetLog.d("注册失败 HTTP \(http)")
-                    return
-                }
-                self.serverField.stringValue = base
-                self.channelField.stringValue = channel
-                self.keyField.stringValue = key
-                self.applyFromFields(feedback: "已注册通道「\(channel)」并生效，配对块已复制到剪贴板——粘贴发给你的智能体即可。")
-                self.copyPairingBlock(server: base, channel: channel, key: key)
-                PetLog.d("注册成功 channel=\(channel) keyLen=\(key.count)（钥不记日志）")
-            }
-        }.resume()
+    @objc private func reopenOnboarding() {
+        PetLog.d("[pairing] 设置页点「重新走引导」")
+        onReopenOnboarding?()
     }
 
-    /// 把当前配置（服务器/通道/本机已存钥）组装成配对块复制到剪贴板。
+    @objc private func openHelpPage() {
+        PetLog.d("[pairing] 打开落地页（全部说明唯一出处）https://pet.8529527.xyz/")
+        NSWorkspace.shared.open(URL(string: "https://pet.8529527.xyz/")!)
+    }
+
+    /// 粘贴配对串连接：PairingString 按 PROTOCOL 4 步解码校验 → 填三字段 →
+    /// 即时应用落盘 → 复用测连接给反馈。失败只提示、不动现有配置。
+    @objc private func connectFromPairing() {
+        guard let parsed = PairingString.parse(pairingField.stringValue) else {
+            statusLabel.stringValue = "配对串不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
+            return
+        }
+        isLoading = true
+        serverField.stringValue = parsed.server
+        channelField.stringValue = parsed.channel
+        keyField.stringValue = parsed.key
+        isLoading = false
+        PetLog.d("[pairing] 配对串已填入三字段 server=\(parsed.server) channel=\(parsed.channel)，即时应用并测连接")
+        applyFromFields(feedback: "配对串已填入并生效，正在测连接…")
+        testConnection()
+    }
+
+    /// 把当前配置组装成新配对串复制到剪贴板（取代 v1 三行配对块）。
     @objc private func copyPairing() {
         let channel = currentChannelName()
         guard !channel.isEmpty, let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
-            statusLabel.stringValue = "复制配对块失败：当前通道还没有保存在本机的 accesskey（先注册新通道，或填入钥、回车存入本机）。"
-            PetLog.d("复制配对块失败 channel=\(channel)：本机无钥")
+            statusLabel.stringValue = "复制配对串失败：当前通道还没有保存在本机的 accesskey（先粘贴配对串连接，或在上方填入钥、回车存入本机）。"
+            PetLog.d("[pairing] 复制配对串失败 channel=\(channel)：本机无钥")
             return
         }
-        copyPairingBlock(server: currentServerBase(), channel: channel, key: key)
-        statusLabel.stringValue = "配对块已复制：把三行（server/channel/key）发给你的智能体，它就能往这条通道写状态。配对块含钥，只发给信任的对象。"
-        PetLog.d("配对块已复制 channel=\(channel)（钥不记日志）")
-    }
-
-    private func copyPairingBlock(server: String, channel: String, key: String) {
-        let block = "server: \(server)\nchannel: \(channel)\nkey: \(key)"
+        let str = PairingString.encode(server: currentServerBase(), channel: channel, key: key)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(block, forType: .string)
+        NSPasteboard.general.setString(str, forType: .string)
+        statusLabel.stringValue = "配对串已复制：整串发给你的智能体，它就能往这条通道写状态。配对串含钥，只发给信任的对象。"
+        PetLog.d("[pairing] 配对串已复制 channel=\(channel)（钥不记日志）")
     }
 
     // MARK: - 导出 skill 包
@@ -724,12 +679,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         return base
     }
 
-    /// .app 内置 skill 模板目录（assemble 时拷到 Contents/Resources/skill/relay-channel）；缺失返回 nil。
+    /// .app 内置 skill 模板目录（v0.18 起为 relay-channel-setup 包）；缺失返回 nil。
     private func skillTemplateDir() -> URL? {
-        guard let res = Bundle.main.resourceURL else { return nil }
-        let dir = res.appendingPathComponent("skill/relay-channel", isDirectory: true)
-        let md = dir.appendingPathComponent("SKILL.md")
-        return FileManager.default.fileExists(atPath: md.path) ? dir : nil
+        SkillExport.templateDir("relay-channel-setup")
     }
 
     /// 刷新导出按钮可用状态：模板缺失或本机无当前通道的钥文件时禁用。窗口打开与每次即时应用后调用。
@@ -738,7 +690,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         if skillTemplateDir() == nil {
             exportButton.isEnabled = false
             exportHint.stringValue = "应用内未找到 skill 模板，无法导出。"
-            PetLog.d("导出 skill 不可用：Bundle 内未找到 skill/relay-channel 模板")
+            PetLog.d("导出 skill 不可用：Bundle 内未找到 skill/relay-channel-setup 模板")
             return
         }
         let channel = currentChannelName()

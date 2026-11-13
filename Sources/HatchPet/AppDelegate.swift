@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let poller = ChannelPoller()
     private let bubble = BubbleController()
     private let settingsController = SettingsWindowController()
+    private let onboarding = OnboardingWindowController()
     private var workspaceObservers: [NSObjectProtocol] = []
     private var distributedObservers: [NSObjectProtocol] = []
     private var staleTimer: Timer?
@@ -104,10 +105,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        settingsController.onReopenOnboarding = { [weak self] in
+            self?.onboarding.show()
+        }
+        onboarding.onConnected = { [weak self] in
+            PetLog.d("[onboarding] 引导连接成功回调：重启轮询器使新配置生效")
+            self?.poller.restart()
+        }
+
         setupPoller()
         registerSystemObservers()
         stateMachine.start()
         poller.restart()
+        // 首启引导（v0.18）：未配置通道+钥时弹出引导窗；已配置直接进宠物、不打扰
+        let launchCfg = ChannelSettings.load()
+        let launchHasKey = ChannelSettings.accessKey(for: launchCfg.channel).map { !$0.isEmpty } ?? false
+        if launchCfg.channel.isEmpty || !launchHasKey {
+            PetLog.d("[onboarding] 未配置通道+钥（channel空=\(launchCfg.channel.isEmpty) hasKey=\(launchHasKey)），启动弹出引导窗")
+            onboarding.show()
+        } else {
+            PetLog.d("[onboarding] 已配置通道 \(launchCfg.channel)，不弹引导")
+        }
         startStaleTimer()
         // 启动静默检查更新（每天最多一次，失败只记日志；见 UpdateChecker）
         UpdateChecker.checkOnLaunchIfNeeded()
