@@ -11,7 +11,18 @@ import AppKit
 /// 的服务器，已配置自建/私有中转的用户重走引导必 404）；/redeem 同理固定公共
 /// 中转。② 版式收紧：品牌区 + 分组卡片（浅色圆角），窗口高度按可见分组动态
 /// 计算（隐藏分组不占位），删底部「关闭」按钮（标题栏关闭钮已足够）。
-final class OnboardingWindowController: NSObject {
+/// v0.24：① 修品牌标题被窗口顶边裁切——relayout 旧实现把 win.frame 高（含
+/// 标题栏约 28pt）直接当 content 高用，内容整体上移一个标题栏、标题上半截被
+/// 吃掉；改用 frameRect(forContentRect:) 换算，并把顶距放宽到 22pt。② 代理
+/// 链路核对与可见化：存储键/设置页保存/读取/fetchStatus 传参/makeSession 的
+/// CFNetwork 字典五段在代码上全对得上，断点在字典被 CFNetwork 真正执行这一
+/// 步 App 侧不可观测（且本机 TUN 会兜底掩盖其他流量）——引导页状态行下新增
+/// 代理配置行，与 ChannelSettings 同一份存储、预填现值、改完即存即重查，
+/// 每次查询尝试都把 via=proxy(host:port)/direct 与结果记进日志，走没走代理
+/// 从此有据可查。③ /status 与 /redeem 韧性兜底：先走已保存代理（主路），没
+/// 拿到服务器有效应答且首试确实走了代理时，自动直连重试一次；两次都失败才
+/// 进失败态，失败文案主句后以小字附最终错误诊断（HTTP 码或错误域+码）。
+final class OnboardingWindowController: NSObject, NSTextFieldDelegate {
     var onConnected: (() -> Void)?
 
     private var window: NSWindow?
@@ -20,6 +31,13 @@ final class OnboardingWindowController: NSObject {
     private var brandSub: NSTextField!
     private var statusLine: NSTextField!
     private var retryButton: NSButton!
+    private var proxyCheckbox: NSButton!
+    private var proxyTypePopup: NSPopUpButton!
+    private var proxyHostField: NSTextField!
+    private var proxyPortField: NSTextField!
+    private var proxyHint: NSTextField!
+    /// 预填代理行时为真，屏蔽「改动即存即重查」（只认用户真实编辑）
+    private var isPrefillingProxy = false
     private var claimCard: NSBox!
     private var claimText: NSTextField!
     private var botCard: NSBox!
@@ -30,6 +48,8 @@ final class OnboardingWindowController: NSObject {
     private var emailField: NSTextField!
     private var feedback: NSTextField!
     private var actionButtons: [NSButton] = []
+    /// /status 失败态时状态行多出一行小字诊断，状态段额外高度（0 = 单行）
+    private var statusDetailH: CGFloat = 0
 
     // 布局常量（手动 frame；relayout 按可见分组从顶往下排并定窗高）
     private static let W: CGFloat = 560
@@ -94,11 +114,37 @@ final class OnboardingWindowController: NSObject {
         // 名额状态行 + 重试
         statusLine = NSTextField(labelWithString: "正在查询公共中转名额…")
         statusLine.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLine.lineBreakMode = .byWordWrapping
+        statusLine.maximumNumberOfLines = 2 // 失败态第二行是小字诊断（见 showStatusFailure）
         content.addSubview(statusLine)
         retryButton = NSButton(title: "重试", target: self, action: #selector(fetchStatusTapped))
         retryButton.bezelStyle = .rounded
         retryButton.isHidden = true
         content.addSubview(retryButton)
+
+        // 代理配置行（v0.24）：与 ChannelSettings 同一份存储——首启未配置用户
+        // 唯一的代理入口，也是核对「查询到底走没走已保存代理」的可见入口。
+        // 字段与归一化口径同设置页（proxyFromFields 一套），改动即存即重查。
+        proxyCheckbox = NSButton(checkboxWithTitle: "使用代理", target: self, action: #selector(proxyRowChanged))
+        content.addSubview(proxyCheckbox)
+        proxyTypePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        proxyTypePopup.addItems(withTitles: ["HTTP", "SOCKS5"])
+        proxyTypePopup.target = self
+        proxyTypePopup.action = #selector(proxyRowChanged)
+        content.addSubview(proxyTypePopup)
+        proxyHostField = NSTextField()
+        proxyHostField.placeholderString = ProxyConfig.defaultHost
+        proxyHostField.delegate = self
+        content.addSubview(proxyHostField)
+        proxyPortField = NSTextField()
+        proxyPortField.placeholderString = "\(ProxyConfig.defaultPort)"
+        proxyPortField.delegate = self
+        content.addSubview(proxyPortField)
+        proxyHint = NSTextField(labelWithString: "查不到名额？挂代理的用户先在这里填代理——与设置页同一份配置，改完自动重新查询。")
+        proxyHint.font = .systemFont(ofSize: 11)
+        proxyHint.textColor = .secondaryLabelColor
+        content.addSubview(proxyHint)
+        prefillProxyRow()
 
         // 免费通道卡片（分流 open 时显示）
         claimCard = makeCard(height: Self.claimCardH)
@@ -205,29 +251,48 @@ final class OnboardingWindowController: NSObject {
 
     /// 按当前可见分组从顶往下排版并定窗高：隐藏的主卡片不占位，
     /// 失败/未分流态窗口自动收矮，不留大片空白。调整窗高时锚定顶边。
+    /// v0.24 修裁切：这里算出的 H 是 **content 高**，窗口 frame 高还要加上标题
+    /// 栏（约 28pt），必须用 frameRect(forContentRect:) 换算——旧实现直接拿
+    /// frame 高当 content 高、又把 content.frame 强设为该高度，内容被整体上移
+    /// 一个标题栏，品牌标题的上半截被窗口顶边吃掉。content 的实际尺寸由窗口
+    /// 按 contentRect 自动给定，本函数也不再手动赋 content.frame。
+    /// 各段高度与卡内子视图已逐项核对：品牌区 56（图标 44 + 上下留白 6/6，
+    /// 标题行 22 + 副文案 32 + 间隔 2）；状态段 26（+失败诊断行时 +15）；
+    /// 代理行 46（控件行 26 + 间隔 4 + 提示行 16）；免费卡 148
+    /// （14+36+6+28+6+44+14）、bot 卡 120（14+36+4+28+8+16+14）、
+    /// 通道码卡 80（14+18+8+26+14）、自建卡 126（14+18+6+26+8+40+14），
+    /// 均与 ensureWindow 里的子视图 frame 一一对应，不重叠不裁切。
     private func relayout() {
-        guard let win = window, let content = win.contentView else { return }
+        guard let win = window else { return }
         let mainH: CGFloat = !claimCard.isHidden ? Self.claimCardH : (!botCard.isHidden ? Self.botCardH : 0)
-        var H: CGFloat = 18 + 56 + 10 + 26 + 12 + Self.pairingCardH + 12 + Self.selfhostCardH + 10 + 30 + 16
-        if mainH > 0 { H += mainH + 12 }
+        let statusH: CGFloat = 26 + statusDetailH
+        var contentH: CGFloat = 22 + 56 + 10 + statusH + 12 + 46 + 12 + Self.pairingCardH + 12 + Self.selfhostCardH + 10 + 30 + 16
+        if mainH > 0 { contentH += mainH + 12 }
+        let target = win.frameRect(forContentRect: NSRect(x: 0, y: 0, width: Self.W, height: contentH))
         var frame = win.frame
-        if abs(frame.height - H) > 0.5 || abs(frame.width - Self.W) > 0.5 {
+        if abs(frame.height - target.height) > 0.5 || abs(frame.width - target.width) > 0.5 {
             let topEdge = frame.maxY
-            frame.size = NSSize(width: Self.W, height: H)
-            frame.origin.y = topEdge - H
+            frame.size = target.size
+            frame.origin.y = topEdge - target.height
             win.setFrame(frame, display: true, animate: false)
         }
-        content.frame = NSRect(x: 0, y: 0, width: Self.W, height: H)
-        var top = H - 18 // 距顶游标：每放一段减去其高度
+        var top = contentH - 22 // 距顶游标（content 坐标）：每放一段减去其高度
         // 品牌区（高 56）
         brandIcon.frame = NSRect(x: Self.X, y: top - 50, width: 44, height: 44)
-        brandTitle.frame = NSRect(x: Self.X + 56, y: top - 24, width: Self.FW - 56, height: 24)
+        brandTitle.frame = NSRect(x: Self.X + 56, y: top - 22, width: Self.FW - 56, height: 22)
         brandSub.frame = NSRect(x: Self.X + 56, y: top - 56, width: Self.FW - 56, height: 32)
         top -= 56 + 10
-        // 状态行（高 26）
-        statusLine.frame = NSRect(x: Self.X, y: top - 22, width: Self.FW - 92, height: 18)
+        // 状态行（高 26，失败诊断行再 +15）
+        statusLine.frame = NSRect(x: Self.X, y: top - (22 + statusDetailH), width: Self.FW - 92, height: 18 + statusDetailH)
         retryButton.frame = NSRect(x: Self.X + Self.FW - 80, y: top - 26, width: 80, height: 26)
-        top -= 26 + 12
+        top -= statusH + 12
+        // 代理行（高 46：控件行 26 + 间隔 4 + 提示行 16）
+        proxyCheckbox.frame = NSRect(x: Self.X, y: top - 25, width: 88, height: 24)
+        proxyTypePopup.frame = NSRect(x: Self.X + 92, y: top - 26, width: 92, height: 26)
+        proxyHostField.frame = NSRect(x: Self.X + 192, y: top - 25, width: 224, height: 24)
+        proxyPortField.frame = NSRect(x: Self.X + 424, y: top - 25, width: 96, height: 24)
+        proxyHint.frame = NSRect(x: Self.X, y: top - 46, width: Self.FW, height: 16)
+        top -= 46 + 12
         // 主卡片（可见才占位）
         if !claimCard.isHidden {
             claimCard.frame = NSRect(x: Self.X, y: top - Self.claimCardH, width: Self.FW, height: Self.claimCardH)
@@ -262,35 +327,44 @@ final class OnboardingWindowController: NSObject {
         retryButton.isHidden = true
         claimCard.isHidden = true
         botCard.isHidden = true
+        statusDetailH = 0
         relayout()
-        PetLog.d("[onboarding] GET \(base)/status 查公共中取名额分流（固定公共中转，与当前配置服务器无关）")
         guard let url = URL(string: "\(base)/status") else {
-            statusLine.stringValue = "查不到名额（网络或服务异常），点重试；已有通道码可直接在下面连接。"
-            retryButton.isHidden = false
+            showStatusFailure(http: -1, error: nil)
             return
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        let session = RelaySession.makeSession(proxy: cfg.proxy)
-        session.dataTask(with: request) { [weak self] data, response, error in
-            session.finishTasksAndInvalidate()
+        statusAttempt(request: request, proxy: cfg.proxy, isRetry: false)
+    }
+
+    /// /status 单次尝试。v0.24 韧性：首试按配置 proxy；没解析出有效应答且首试
+    /// 确实走了代理时，自动直连（ProxyConfig.disabled）重试一次；两次都失败
+    /// 才进失败态。两次尝试的 url/代理与否/http/err 都记日志。
+    private func statusAttempt(request: URLRequest, proxy: ProxyConfig, isRetry: Bool) {
+        let n = isRetry ? 2 : 1
+        let via = isRetry ? "direct（直连重试）" : (proxy.isActive ? "proxy(\(proxy.summary))" : "direct")
+        PetLog.d("[onboarding] GET \(request.url?.absoluteString ?? "-") 查公共中取名额 attempt=\(n) via=\(via)")
+        sendOnce(request, proxy: isRetry ? .disabled : proxy) { [weak self] data, http, error in
+            guard let self else { return }
+            let parsed = Self.parseStatus(data, http, error)
+            PetLog.d("[onboarding] /status attempt=\(n) 结果 http=\(http) err=\(Self.errDesc(error)) parsed=\(parsed != nil)")
+            if parsed == nil, !isRetry, proxy.isActive {
+                PetLog.d("[onboarding] /status 经代理未拿到有效应答，自动直连重试一次")
+                self.statusAttempt(request: request, proxy: proxy, isRetry: true)
+                return
+            }
             DispatchQueue.main.async {
-                guard let self else { return }
-                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
-                guard error == nil, http == 200, let data,
-                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                      let state = obj["state"] as? String else {
-                    self.statusLine.stringValue = "查不到名额（网络或服务异常），点重试；已有通道码可直接在下面连接。"
-                    self.retryButton.isHidden = false
-                    PetLog.d("[onboarding] 公共中转 /status 失败 http=\(http) err=\(error?.localizedDescription ?? "-")（降级：通道码/自建仍可用）")
+                guard let parsed else {
+                    self.showStatusFailure(http: http, error: error)
                     return
                 }
-                let left = (obj["free_left"] as? NSNumber)?.intValue ?? 0
-                if state == "open" {
+                self.statusDetailH = 0
+                if parsed.state == "open" {
                     self.statusLine.stringValue = "免费通道：有名额"
-                    self.claimText.stringValue = "免费通道还有名额（剩余 \(left) 个），用领取 skill 让智能体帮你领一条免费通道："
+                    self.claimText.stringValue = "免费通道还有名额（剩余 \(parsed.left) 个），用领取 skill 让智能体帮你领一条免费通道："
                     self.claimCard.isHidden = false
-                    PetLog.d("[onboarding] 分流=open free_left=\(left)，显示免费通道领取面板")
+                    PetLog.d("[onboarding] 分流=open free_left=\(parsed.left)，显示免费通道领取面板")
                 } else {
                     self.statusLine.stringValue = "免费通道：直领名额已满"
                     self.botCard.isHidden = false
@@ -298,7 +372,131 @@ final class OnboardingWindowController: NSObject {
                 }
                 self.relayout()
             }
+        }
+    }
+
+    /// /status 失败态：主句保持简短，其后第二行小字附最终一次尝试的错误诊断。
+    private func showStatusFailure(http: Int, error: Error?) {
+        let main = "查不到名额（网络或服务异常），点重试；已有通道码可直接在下面连接。"
+        let attr = NSMutableAttributedString(string: main, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        attr.append(NSAttributedString(string: "\n\(Self.failureDetail(http: http, error: error))", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        statusLine.attributedStringValue = attr
+        statusDetailH = 15
+        retryButton.isHidden = false
+        relayout()
+        PetLog.d("[onboarding] 公共中转 /status 失败（最终）http=\(http) err=\(Self.errDesc(error))（降级：通道码/自建仍可用）")
+    }
+
+    // MARK: - 公共中转请求小工具
+
+    /// 发一次请求并回报 (data, http, error)；会话用完即弃。
+    private func sendOnce(_ request: URLRequest, proxy: ProxyConfig,
+                          completion: @escaping (Data?, Int, Error?) -> Void) {
+        let session = RelaySession.makeSession(proxy: proxy)
+        session.dataTask(with: request) { data, response, error in
+            session.finishTasksAndInvalidate()
+            completion(data, (response as? HTTPURLResponse)?.statusCode ?? -1, error)
         }.resume()
+    }
+
+    /// /status 有效应答解析：200 + JSON 含 state 才算拿到服务器应答。
+    private static func parseStatus(_ data: Data?, _ http: Int, _ error: Error?) -> (state: String, left: Int)? {
+        guard error == nil, http == 200, let data,
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let state = obj["state"] as? String else { return nil }
+        return (state, (obj["free_left"] as? NSNumber)?.intValue ?? 0)
+    }
+
+    /// 日志用错误描述：域/码 + 本地化说明。
+    private static func errDesc(_ error: Error?) -> String {
+        guard let error else { return "-" }
+        let ns = error as NSError
+        return "\(ns.domain)/\(ns.code) \(error.localizedDescription)"
+    }
+
+    /// 失败文案的小字诊断：（HTTP 503）或（错误域 码）；两者皆无则（无响应）。
+    private static func failureDetail(http: Int, error: Error?) -> String {
+        if let error {
+            let ns = error as NSError
+            return "（\(ns.domain) \(ns.code)）"
+        }
+        return http > 0 ? "（HTTP \(http)）" : "（无响应）"
+    }
+
+    /// feedback 用文案：主句 + 其后小字诊断（同行拼接）。
+    private static func feedbackText(main: String, detail: String) -> NSAttributedString {
+        let attr = NSMutableAttributedString(string: main, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+        ])
+        attr.append(NSAttributedString(string: " \(detail)", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        return attr
+    }
+
+    // MARK: - 代理行（引导页内嵌，与 ChannelSettings 同一份存储）
+
+    /// 预填已保存的代理值（建窗时调一次；预填不触发保存/重查）
+    private func prefillProxyRow() {
+        let proxy = ChannelSettings.load().proxy
+        isPrefillingProxy = true
+        proxyCheckbox.state = proxy.enabled ? .on : .off
+        proxyTypePopup.selectItem(at: proxy.type == "socks" ? 1 : 0)
+        proxyHostField.stringValue = proxy.host
+        proxyPortField.stringValue = "\(proxy.port)"
+        isPrefillingProxy = false
+        updateProxyRowControls()
+        PetLog.d("[onboarding] 代理行预填 proxy=\(proxy.summary)（引导页与设置页同一份存储）")
+    }
+
+    /// 未勾选时类型/主机/端口置灰（口径同设置页）
+    private func updateProxyRowControls() {
+        let on = proxyCheckbox.state == .on
+        proxyTypePopup.isEnabled = on
+        proxyHostField.isEnabled = on
+        proxyPortField.isEnabled = on
+    }
+
+    /// 从代理行控件读配置：归一化口径同设置页 proxyFromFields（空主机→默认、
+    /// 端口非法→默认），保证从零填写也能拼出可用配置。
+    private func proxyFromRow() -> ProxyConfig {
+        let host = proxyHostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = Int(proxyPortField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { (1...65535).contains($0) ? $0 : nil } ?? ProxyConfig.defaultPort
+        return ProxyConfig(enabled: proxyCheckbox.state == .on,
+                           type: proxyTypePopup.indexOfSelectedItem == 1 ? "socks" : "http",
+                           host: host.isEmpty ? ProxyConfig.defaultHost : host,
+                           port: port)
+    }
+
+    @objc private func proxyRowChanged() {
+        guard !isPrefillingProxy else { return }
+        updateProxyRowControls()
+        applyProxyFromRow()
+    }
+
+    /// 代理主机/端口编辑结束（回车或失焦）即保存 + 重查
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard !isPrefillingProxy, let field = obj.object as? NSTextField,
+              field === proxyHostField || field === proxyPortField else { return }
+        applyProxyFromRow()
+    }
+
+    /// 存回同一份 ChannelSettings 存储（只换 proxy，服务器/通道/间隔以已保存
+    /// 值为准，不碰其他字段），随即用新代理重新查名额。
+    private func applyProxyFromRow() {
+        var cfg = ChannelSettings.load()
+        cfg.proxy = proxyFromRow()
+        ChannelSettings.save(cfg)
+        PetLog.d("[onboarding] 代理行改动已保存 proxy=\(cfg.proxy.summary)，自动重新查名额")
+        fetchStatus()
     }
 
     // MARK: - 领取 / 自建导出
@@ -358,31 +556,51 @@ final class OnboardingWindowController: NSObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = ["code": code, "tgId": tgIdJSON]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        let session = RelaySession.makeSession(proxy: cfg.proxy)
-        session.dataTask(with: request) { [weak self] data, response, error in
-            session.finishTasksAndInvalidate()
+        redeemAttempt(request: request, proxy: cfg.proxy, base: base, isRetry: false)
+    }
+
+    /// /redeem 单次尝试。v0.24 韧性与 /status 同口径：首试走已保存代理（主
+    /// 路）；拿到服务器应答（201 成功或带业务 error 的 JSON）即为定论、不重
+    /// 试——避免一次性领取码被无谓重复提交；只有传输层失败/无应答（如代理异
+    /// 常、CF 边缘错误页）且首试确实走了代理时，才自动直连重试一次。两次都
+    /// 没拿到应答才报网络失败，主句后以小字附最终错误诊断。
+    private func redeemAttempt(request: URLRequest, proxy: ProxyConfig, base: String, isRetry: Bool) {
+        let n = isRetry ? 2 : 1
+        let via = isRetry ? "direct（直连重试）" : (proxy.isActive ? "proxy(\(proxy.summary))" : "direct")
+        PetLog.d("[redeem] attempt=\(n) via=\(via) url=\(request.url?.absoluteString ?? "-")")
+        sendOnce(request, proxy: isRetry ? .disabled : proxy) { [weak self] data, http, error in
+            guard let self else { return }
+            let obj = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            let channel = obj?["channel"] as? String
+            let key = obj?["key"] as? String
+            let succeeded = http == 201 && channel.map { !$0.isEmpty } == true && key.map { !$0.isEmpty } == true
+            // 「服务器应答」= 无传输错误且回了可解析 JSON（成功或业务错误都算）
+            let answered = error == nil && obj != nil
+            PetLog.d("[redeem] attempt=\(n) 结果 http=\(http) err=\(Self.errDesc(error)) answered=\(answered) ok=\(succeeded) error=\((obj?["error"] as? String) ?? "-")")
+            if !answered, !isRetry, proxy.isActive {
+                PetLog.d("[redeem] 经代理未拿到服务器应答，自动直连重试一次")
+                self.redeemAttempt(request: request, proxy: proxy, base: base, isRetry: true)
+                return
+            }
             DispatchQueue.main.async {
-                guard let self else { return }
                 self.setActionsEnabled(true)
-                let http = (response as? HTTPURLResponse)?.statusCode ?? -1
-                if let error {
-                    self.feedback.stringValue = "兑换失败：\(error.localizedDescription)"
-                    PetLog.d("[redeem] 兑换网络错误：\(error.localizedDescription)")
-                    return
-                }
-                let obj = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
-                if http == 201, let channel = obj?["channel"] as? String,
-                   let key = obj?["key"] as? String, !channel.isEmpty, !key.isEmpty {
+                if succeeded, let channel, let key {
                     PetLog.d("[redeem] 兑换成功 channel=\(channel) keyLen=\(key.count)，自动走连接流程")
                     self.applyConnection(server: base, channel: channel, key: key, source: "redeem")
                     return
                 }
-                let errCode = obj?["error"] as? String ?? ""
-                self.feedback.stringValue = Self.redeemErrorText(errCode, http: http,
-                                                                 channel: obj?["channel"] as? String)
-                PetLog.d("[redeem] 兑换失败 http=\(http) error=\(errCode)")
+                if answered {
+                    let errCode = obj?["error"] as? String ?? ""
+                    self.feedback.stringValue = Self.redeemErrorText(errCode, http: http, channel: channel)
+                    PetLog.d("[redeem] 兑换失败 http=\(http) error=\(errCode)")
+                    return
+                }
+                self.feedback.attributedStringValue = Self.feedbackText(
+                    main: "兑换失败：网络异常，请稍后重试。",
+                    detail: Self.failureDetail(http: http, error: error))
+                PetLog.d("[redeem] 兑换网络失败（未拿到服务器应答）最终 http=\(http) err=\(Self.errDesc(error))")
             }
-        }.resume()
+        }
     }
 
     /// PROTOCOL /redeem 错误码 → 人话
