@@ -2,8 +2,11 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
+/// v0.27：通道码框设死单行（maximumNumberOfLines=1、cell usesSingleLineMode、
+/// 不换行可横滚，与引导页同口径）；v0.26 的字数提示文案全部去掉，粘贴清洗
+/// 保留但无声。连接行本就是一行横排（标签+框+连接），不改。
 /// v0.26：通道码框挂 delegate 做粘贴清洗（内容变化即去掉全部空白、多行剪贴板
-/// 自动拼成一整串、状态行报字数确认；根因与主菜单修复见 main.swift）。
+/// 自动拼成一整串；根因与主菜单修复见 main.swift）。
 /// v0.25：删各节独立说明文字（代理/形象/更新三处说明行、状态行初始说明），
 /// 反馈文案缩短为一句事实；关于节按钮改「官网」。
 /// v0.23：删「导出 skill」整节（引导页免费通道与自建面板已有各自导出入口，此处
@@ -33,8 +36,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 最近一次测连接结果（nil = 本次打开设置后未测）：状态行尾巴用，刷新见 refreshConnectionStatus
     private var lastTestOK: Bool?
     private var pairingField: NSTextField!
-    /// 通道码框上次内容长度：判「整串刚粘进来」以便只在整串到达时报字数确认（v0.26）
-    private var pairingPrevLen = 0
     private var copyPairingButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
@@ -97,6 +98,12 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         pairingField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 88, height: 24))
         pairingField.placeholderString = "粘贴通道码"
         pairingField.delegate = self // v0.26：粘贴清洗（见 controlTextDidChange）
+        // v0.27：设死单行——不换行、不撑高，长串框内横向滚动/裁剪（同引导页）
+        pairingField.maximumNumberOfLines = 1
+        pairingField.cell?.usesSingleLineMode = true
+        pairingField.cell?.wraps = false
+        pairingField.cell?.isScrollable = true
+        pairingField.lineBreakMode = .byClipping
         content.addSubview(pairingField)
         let pairConnectBtn = NSButton(title: "连接", target: self, action: #selector(connectFromPairing))
         pairConnectBtn.bezelStyle = .rounded
@@ -549,25 +556,17 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
 
     /// 内容变化即清洗：去掉全部空白（换行、回车、空格）——剪贴板里的串被聊天
     /// 客户端折成多行时，粘进来立刻拼成一整串单行，不再被单行字段编辑器在
-    /// 首个换行处截断。清洗确实改写了内容时把 caret 拉到串尾并滚动到可见；
-    /// 整串到达（清洗发生、或长度跃升到整串量级）时在状态行报字数，让用户
-    /// 确认已输入。只对通道码框生效，代理字段不走这里。
+    /// 首个换行处截断。清洗确实改写了内容时把 caret 拉到串尾并滚动到可见。
+    /// 清洗无声：不给任何字数/已输入类反馈文案（v0.27 用户定版）。只对通道
+    /// 码框生效，代理字段不走这里。
     func controlTextDidChange(_ obj: Notification) {
         guard !isLoading, let field = obj.object as? NSTextField, field === pairingField else { return }
         let raw = field.stringValue
         let cleaned = raw.components(separatedBy: .whitespacesAndNewlines).joined()
-        let sanitized = cleaned != raw
-        if sanitized {
+        if cleaned != raw {
             field.stringValue = cleaned
             moveCaretToEnd(field)
             PetLog.d("[pairing] 通道码输入清洗：去掉空白 \(raw.count - cleaned.count) 字、拼成一整串 len=\(cleaned.count)（串本体不记日志）")
-        }
-        let prev = pairingPrevLen
-        pairingPrevLen = cleaned.count
-        if sanitized {
-            statusLabel.stringValue = "通道码已自动拼成一整串（共 \(cleaned.count) 字），点「连接」应用。"
-        } else if cleaned.count >= 40, prev < 40 || cleaned.count - prev >= 10 {
-            statusLabel.stringValue = "通道码已输入（共 \(cleaned.count) 字），点「连接」应用。"
         }
     }
 
@@ -606,7 +605,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         ChannelSettings.save(cfg)
         KeyFileStore.save(key: parsed.key, channel: parsed.channel)
         pairingField.stringValue = ""
-        pairingPrevLen = 0
         lastTestOK = nil
         refreshConnectionStatus()
         appliedSnapshot = snapshotFromFields()

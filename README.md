@@ -40,6 +40,12 @@ bundle id `com.nonzero.musepet.mac`、数据目录 `Application Support/MusePet`
 客户端折成多行的串自动拼成一整串，清洗后 caret 拉到串尾、并在反馈行报
 「已输入（共 N 字）」确认；输入框保持单行，parse 与连接/兑换流程不变。
 
+**v0.27 起**：引导页通道码框、bot 面板领取串框、设置页通道码框统一设死单行
+（maximumNumberOfLines=1、cell usesSingleLineMode、不换行可横滚，等价
+lineLimit=1），长串只占一行、绝不撑高，卡片布局不动；v0.26 的字数提示文案
+（「已输入（共 N 字）」类）全部去掉，粘贴清洗保留但无声；设置页通道行本就
+是一行横排（标签 + 框 + 连接），核对未改。
+
 分支策略：`main` 分支在正式就绪前保持只有 README，开发全部在 `dev` 分支，
 构建也只由 `dev` 的推送（或手动 Run workflow）触发。
 
