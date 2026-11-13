@@ -1,7 +1,10 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 + 导出 skill 包。
+/// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
+/// v0.23：删「导出 skill」整节（引导页免费通道与自建面板已有各自导出入口，此处
+/// 是重复入口；SkillExport 本体不动）与「说明」整节；新增「关于」节（一行版本 +
+/// 官网/落地页链接按钮）。
 /// v0.21：连接区再简化——删掉只读展示块，只剩一行「通道：[粘贴框] 连接」+ 状态行；
 /// 连接凭证的用户面名称统一叫「通道码」（即 hatchpet1: 串，旧称配对串；wire 格式与
 /// PairingString 解析不变）。
@@ -33,8 +36,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var proxyHostField: NSTextField!
     private var proxyPortField: NSTextField!
     private var statusLabel: NSTextField!
-    private var exportButton: NSButton!
-    private var exportHint: NSTextField!
     /// 「形象」小节每状态一行：来源字 + 恢复默认按钮（key 为状态本身）
     private var assetRows: [PetState: (source: NSTextField, reset: NSButton)] = [:]
     private var updateStatusLabel: NSTextField!
@@ -42,9 +43,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var isLoading = false
     /// 最近一次已应用的控件快照（关窗时若与当前控件不一致，自动提交一次防丢失）
     private var appliedSnapshot: String?
-
-    /// v0.18 起说明只留一行短提示，全部说明导向落地页（唯一出处）
-    private static let helpHint = "配置只认通道码；其余改动即时生效、无保存按钮。完整说明看落地页："
 
     func show() {
         let window = ensureWindow()
@@ -59,12 +57,12 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
 
     private func ensureWindow() -> NSWindow {
         if let window { return window }
-        // v0.11 起多了「形象」「关于/更新」两节，窗口加高到 1060；超过屏幕
-        // 可视高时按屏幕收（下方说明区滚动高度随之变小，布局是光标驱动的、
-        // 整体等比下移，不会错位）。
+        // 窗口高度按光标驱动布局的总 decrement 定：内容排满后底部留约 60 给
+        // 关闭按钮区；超过屏幕可视高时按屏幕收。
         let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
-        // v0.21：连接区简化后内容变矮，窗高同步从 1000 收到 876（少了展示块+提示行共 124）
-        let W: CGFloat = 540, H: CGFloat = min(876, visibleH - 16)
+        // v0.23：删导出 skill（-102）与说明（-70）两节、关于/更新拆为检查更新
+        // （+104）与关于（+68），窗高从 876 收到 782
+        let W: CGFloat = 540, H: CGFloat = min(782, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -170,35 +168,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(statusLabel)
         cursor -= 56
 
-        // 导出 skill 小节
-        let sep = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
-        sep.boxType = .separator
-        content.addSubview(sep)
-        cursor -= 10
-        let exportTitle = NSTextField(labelWithString: "导出 skill")
-        exportTitle.font = .systemFont(ofSize: 13, weight: .semibold)
-        exportTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
-        content.addSubview(exportTitle)
-        cursor -= 24
-        exportButton = NSButton(title: "导出 skill 包…", target: self, action: #selector(exportSkill))
-        exportButton.bezelStyle = .rounded
-        exportButton.frame = NSRect(x: fieldX, y: cursor - 28, width: 150, height: 28)
-        content.addSubview(exportButton)
-        exportHint = NSTextField(labelWithString: "")
-        exportHint.font = .systemFont(ofSize: 11)
-        exportHint.textColor = .secondaryLabelColor
-        exportHint.frame = NSRect(x: fieldX + 160, y: cursor - 26, width: fieldW - 160, height: 22)
-        content.addSubview(exportHint)
-        cursor -= 34
-        let exportWarn = NSTextField(labelWithString: "导出包内含当前服务器、通道名与 accesskey，拿到的人可读写这个通道，只发给信任的人。")
-        exportWarn.font = .systemFont(ofSize: 11)
-        exportWarn.textColor = .secondaryLabelColor
-        exportWarn.lineBreakMode = .byWordWrapping
-        exportWarn.maximumNumberOfLines = 2
-        exportWarn.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
-        content.addSubview(exportWarn)
-        cursor -= 34
-
         // 形象小节（v0.11）：五个状态各一行——来源字 + 选择文件/恢复默认
         let sep2 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
         sep2.boxType = .separator
@@ -243,20 +212,19 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(assetsHint)
         cursor -= 36
 
-        // 关于 / 更新小节（v0.11）：当前版本 + 检查更新按钮 + 更新状态行
-        let updateTitle = NSTextField(labelWithString: "关于 / 更新")
+        // 检查更新小节：检查更新按钮 + 更新状态行（版本行 v0.23 起移到「关于」节）
+        let sep4 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
+        sep4.boxType = .separator
+        content.addSubview(sep4)
+        cursor -= 10
+        let updateTitle = NSTextField(labelWithString: "检查更新")
         updateTitle.font = .systemFont(ofSize: 13, weight: .semibold)
         updateTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
         content.addSubview(updateTitle)
         cursor -= 26
-        _ = addLabel("当前版本", top: cursor)
-        let curVer = NSTextField(labelWithString: AppVersion.displayString)
-        curVer.font = .systemFont(ofSize: 12)
-        curVer.frame = NSRect(x: fieldX, y: cursor - 22, width: 190, height: 20)
-        content.addSubview(curVer)
         let checkBtn = NSButton(title: "检查更新", target: self, action: #selector(checkUpdates))
         checkBtn.bezelStyle = .rounded
-        checkBtn.frame = NSRect(x: 330, y: cursor - 27, width: 110, height: 26)
+        checkBtn.frame = NSRect(x: fieldX, y: cursor - 27, width: 110, height: 26)
         content.addSubview(checkBtn)
         cursor -= 32
         updateStatusLabel = NSTextField(labelWithString: "更新源：GitHub 仓 zeronetizen/hatch-pet-mac 的 Releases（经本页代理）；启动时每天自动静默检查一次。")
@@ -268,27 +236,25 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(updateStatusLabel)
         cursor -= 36
 
-        // 说明（v0.18：一行短提示 + 落地页链接按钮，删去原大段说明滚动区）
-        let sep3 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
-        sep3.boxType = .separator
-        content.addSubview(sep3)
+        // 关于小节（v0.23）：只放一行版本 + 官网/落地页链接按钮，说明文字已全删
+        let sep5 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
+        sep5.boxType = .separator
+        content.addSubview(sep5)
         cursor -= 10
-        let helpLabel = NSTextField(labelWithString: "说明")
-        helpLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        helpLabel.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
-        content.addSubview(helpLabel)
+        let aboutTitle = NSTextField(labelWithString: "关于")
+        aboutTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        aboutTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
+        content.addSubview(aboutTitle)
         cursor -= 26
-        let helpHintLabel = NSTextField(labelWithString: Self.helpHint)
-        helpHintLabel.font = .systemFont(ofSize: 12)
-        helpHintLabel.lineBreakMode = .byWordWrapping
-        helpHintLabel.maximumNumberOfLines = 2
-        helpHintLabel.frame = NSRect(x: fieldX, y: cursor - 28, width: fieldW - 130, height: 28)
-        content.addSubview(helpHintLabel)
-        let helpLinkBtn = NSButton(title: "查看说明", target: self, action: #selector(openHelpPage))
-        helpLinkBtn.bezelStyle = .rounded
-        helpLinkBtn.frame = NSRect(x: fieldX + fieldW - 120, y: cursor - 27, width: 120, height: 26)
-        content.addSubview(helpLinkBtn)
-        cursor -= 34
+        let aboutVer = NSTextField(labelWithString: AppVersion.displayString)
+        aboutVer.font = .systemFont(ofSize: 12)
+        aboutVer.frame = NSRect(x: fieldX, y: cursor - 22, width: 220, height: 20)
+        content.addSubview(aboutVer)
+        let landingBtn = NSButton(title: "官网/落地页", target: self, action: #selector(openLandingPage))
+        landingBtn.bezelStyle = .rounded
+        landingBtn.frame = NSRect(x: fieldX + fieldW - 120, y: cursor - 27, width: 120, height: 26)
+        content.addSubview(landingBtn)
+        cursor -= 32
 
         // 底部按钮（v0.15 即时生效后只剩「关闭」：关窗不回滚，已生效的改动保留；
         // 不给回车等价键——回车留给文本框提交编辑）
@@ -324,7 +290,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         proxyPortField.stringValue = "\(cfg.proxy.port)"
         updateProxyControls()
         statusLabel.stringValue = "换连接请粘贴通道码；其余改动即时生效。"
-        refreshExportState()
         refreshAssetRows()
         appliedSnapshot = snapshotFromFields()
         let keyPresent = !(ChannelSettings.accessKey(for: cfg.channel) ?? "").isEmpty
@@ -416,7 +381,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         let cfg = configFromFields()
         ChannelSettings.save(cfg)
         refreshConnectionStatus()
-        refreshExportState()
         appliedSnapshot = snapshotFromFields()
         onApplied?()
         statusLabel.stringValue = feedback
@@ -515,7 +479,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         onAssetsChanged?(state)
     }
 
-    // MARK: - 关于 / 更新
+    // MARK: - 检查更新 / 关于
 
     @objc private func checkUpdates() {
         updateStatusLabel.stringValue = "检查中…（经当前代理设置访问 GitHub）"
@@ -595,8 +559,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         onReopenOnboarding?()
     }
 
-    @objc private func openHelpPage() {
-        PetLog.d("[pairing] 打开落地页（全部说明唯一出处）https://pet.8529527.xyz/")
+    @objc private func openLandingPage() {
+        PetLog.d("[about] 打开官网/落地页 https://pet.8529527.xyz/")
         NSWorkspace.shared.open(URL(string: "https://pet.8529527.xyz/")!)
     }
 
@@ -616,7 +580,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         pairingField.stringValue = ""
         lastTestOK = nil
         refreshConnectionStatus()
-        refreshExportState()
         appliedSnapshot = snapshotFromFields()
         onApplied?()
         PetLog.d("[pairing] 通道码已应用 server=\(parsed.server) channel=\(parsed.channel)（钥已存本机钥文件、输入框已清空），自动测连接")
@@ -639,7 +602,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         PetLog.d("[pairing] 通道码已复制 channel=\(channel)（钥不记日志）")
     }
 
-    // MARK: - 导出 skill 包
+    // MARK: - 当前连接取值（复制通道码用）
 
     /// 当前通道名与服务器基地址：以已保存并生效的配置为准。
     private func currentChannelName() -> String {
@@ -648,121 +611,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
 
     private func currentServerBase() -> String {
         ChannelSettings.load().baseURL
-    }
-
-    /// .app 内置 skill 模板目录（v0.18 起为 relay-channel-setup 包）；缺失返回 nil。
-    private func skillTemplateDir() -> URL? {
-        SkillExport.templateDir("relay-channel-setup")
-    }
-
-    /// 刷新导出按钮可用状态：模板缺失或本机无当前通道的钥文件时禁用。窗口打开与每次即时应用后调用。
-    private func refreshExportState() {
-        guard let exportButton, let exportHint else { return }
-        if skillTemplateDir() == nil {
-            exportButton.isEnabled = false
-            exportHint.stringValue = "应用内未找到 skill 模板，无法导出。"
-            PetLog.d("导出 skill 不可用：Bundle 内未找到 skill/relay-channel-setup 模板")
-            return
-        }
-        let channel = currentChannelName()
-        if let key = ChannelSettings.accessKey(for: channel), !key.isEmpty {
-            exportButton.isEnabled = true
-            exportHint.stringValue = "可导出，将含通道「\(channel)」的 accesskey。"
-            PetLog.d("导出 skill 可用 channel=\(channel)（钥在本机钥文件中）")
-        } else {
-            exportButton.isEnabled = false
-            exportHint.stringValue = "先粘贴通道码连接后可导出。"
-            PetLog.d("导出 skill 不可用：本机无通道 \(channel) 的钥文件")
-        }
-    }
-
-    @objc private func exportSkill() {
-        let channel = currentChannelName()
-        let server = currentServerBase()
-        guard let template = skillTemplateDir() else {
-            statusLabel.stringValue = "导出失败：应用内未找到 skill 模板。"
-            PetLog.d("skill 导出失败 channel=\(channel)：模板缺失")
-            return
-        }
-        guard let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
-            statusLabel.stringValue = "导出失败：本机没有保存通道「\(channel)」的 accesskey，请先粘贴通道码连接。"
-            PetLog.d("skill 导出失败 channel=\(channel)：本机无钥文件")
-            refreshExportState()
-            return
-        }
-        let fm = FileManager.default
-        let staging = fm.temporaryDirectory.appendingPathComponent("hatchpet-skill-export-\(UUID().uuidString)", isDirectory: true)
-        let pkgDir = staging.appendingPathComponent("relay-channel-setup", isDirectory: true)
-        defer { try? fm.removeItem(at: staging) }
-        do {
-            try fm.createDirectory(at: pkgDir, withIntermediateDirectories: true)
-            for item in try fm.contentsOfDirectory(atPath: template.path) {
-                try fm.copyItem(at: template.appendingPathComponent(item),
-                                to: pkgDir.appendingPathComponent(item))
-            }
-            let cfg: [String: Any] = [
-                "server_url": server,
-                "channel": channel,
-                "accesskey": key,
-                "exported_at": ISO8601DateFormatter().string(from: Date()),
-                "note": "含通道钥，只发给信任的人",
-            ]
-            let data = try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: pkgDir.appendingPathComponent("pet-channel.json"), options: .atomic)
-            PetLog.d("skill 导出组包完成 channel=\(channel) server=\(server) 含钥=true（钥原文不记日志）")
-        } catch {
-            statusLabel.stringValue = "导出失败：组包出错（\(error.localizedDescription)）"
-            PetLog.d("skill 导出组包失败 channel=\(channel)：\(error.localizedDescription)")
-            return
-        }
-        let panel = NSSavePanel()
-        panel.title = "导出 skill 包"
-        panel.message = "包内含当前通道的 accesskey，只发给信任的人。"
-        panel.nameFieldStringValue = "relay-channel-setup-skill.zip"
-        panel.allowedContentTypes = [.zip]
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let dest = panel.url else {
-            statusLabel.stringValue = "已取消导出。"
-            PetLog.d("skill 导出被用户取消 channel=\(channel)")
-            return
-        }
-        do {
-            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-            let ok: Bool
-            if fm.fileExists(atPath: "/usr/bin/ditto") {
-                ok = runTool("/usr/bin/ditto", ["-c", "-k", "--keepParent", "--norsrc", pkgDir.path, dest.path])
-            } else {
-                ok = runTool("/usr/bin/zip", ["-r", dest.path, "relay-channel-setup"], currentDir: staging.path)
-            }
-            guard ok else {
-                throw NSError(domain: "HatchPetExport", code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "打包命令执行失败"])
-            }
-        } catch {
-            statusLabel.stringValue = "导出失败：\(error.localizedDescription)"
-            PetLog.d("skill 导出打包失败 channel=\(channel)：\(error.localizedDescription)")
-            return
-        }
-        statusLabel.stringValue = "已导出 skill 包到：\(dest.path)"
-        PetLog.d("skill 导出成功 路径=\(dest.path) 通道=\(channel) 含钥=true")
-    }
-
-    private func runTool(_ path: String, _ args: [String], currentDir: String? = nil) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        if let currentDir { p.currentDirectoryURL = URL(fileURLWithPath: currentDir) }
-        p.standardOutput = Pipe()
-        p.standardError = Pipe()
-        do {
-            try p.run()
-        } catch {
-            PetLog.d("导出工具启动失败 \(path)：\(error.localizedDescription)")
-            return false
-        }
-        p.waitUntilExit()
-        PetLog.d("导出工具 \(path) 退出码 \(p.terminationStatus)")
-        return p.terminationStatus == 0
     }
 
     private static func timeString(ms: Double) -> String {
