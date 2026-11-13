@@ -146,7 +146,7 @@ final class ChannelPoller {
         var event: String?
         var message: String?
         var dataTs = envelopeTs
-        if let payload = obj["data"] as? [String: Any] {
+        if let payload = (obj["payload"] ?? obj["data"]) as? [String: Any] {
             state = payload["state"] as? String
             event = payload["event"] as? String
             message = payload["message"] as? String
