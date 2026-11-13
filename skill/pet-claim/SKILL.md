@@ -1,55 +1,139 @@
 ---
 name: pet-claim
-description: 给 MusePet 桌面宠物接上公共中转通道。包根目录有 pet-channel.json 时走多对一：跳过领取、直接用那条现成通道写状态；没有时运行包内脚本领取一条免费通道（公共中转 pet.8529527.xyz），拿到免费通道码交给用户粘进 App 完成配对。
+description: 给 MusePet 桌面宠物接上公共中转通道（v4 凭证模型）。包里有 pet-bind.json 时走追加绑定（用一次性绑定码把本 agent 的 writer secret 绑到现成通道）；没有时运行包内脚本直领一条免费通道（secret 哈希绑定），领不到则出 bot 深链由 MusePetBot 建通道后自动完成绑定；包里的 pet-channel.json 在 v4 下只是读钥包，写状态要靠绑定。
 ---
 
-# MusePet 免费通道领取
+# MusePet 通道领取与绑定（v4）
 
 ## 这是什么
 
 MusePet 桌面宠物靠一条「中转通道」接收智能体的状态。官方公共中转
-（pet.8529527.xyz）有一批免费通道名额，本 skill 就是替用户去领一条：
+（pet.8529527.xyz）有一批免费通道名额，本 skill 替用户领/绑一条通道，
+让本 agent 能往宠物写状态。
 
-- 运行 `scripts/claim.mjs` 向公共中转领取一条通道（无需任何账号/凭证）；
-- 脚本拿到通道后**当场写第一条状态完成激活**，然后输出一串免费通道码；
-- 你把免费通道码原样交给用户，用户粘进 MusePet App 的「通道」框，配对结束。
+**v4 凭证模型（先懂这个）**：
 
-本 skill 有两种工作模式，动手前先按下节分流。
+- **writer secret 由本 agent 本地生成**，原文只存本机
+  `keys/<channel>.key`（权限 600），服务端只存它的 sha256 哈希。
+- **写状态必须出示 secret 原文**（`POST {server}/c/{channel}`，
+  `Authorization: Bearer <secret>`），服务端比对哈希。
+- **通道码退化为读钥包**：通道码里是「服务器 + 通道名 + 读钥」，复制
+  只能连上看状态，**写不进去**——拿读钥写会收到 `403 read_only`。
+- 所以全产品只有一种串：**通道码**（给用户粘进 App 用）。没有别的中间串。
 
-## 先分流：包里有没有 pet-channel.json
+## 先分流：看包里的文件
 
-先看本包**根目录**有没有 `pet-channel.json`。用户从 MusePet App 导出
-skill 包时，若 App 里已经配好了一条通道，导出会把那条现成通道的配置附在
-包根目录（字段：`server_url`、`channel`、`accesskey`、`exported_at`、`note`）：
+动手前先看本包**根目录**有什么文件，按下表分流：
 
-- **有 → 多对一模式**：不要运行 `claim.mjs`、不要再领新通道（会白占名额）。
-  按下面「多对一模式」一节，直接用这条现成通道写状态。
-- **没有 → 领取模式**：按下面「流程」一节运行 `claim.mjs` 领取新通道。
+| 包内文件 | 模式 | 做什么 |
+|---|---|---|
+| 有 `pet-bind.json` | **追加绑定** | 跑 `scripts/claim.mjs`，它读绑定文件完成绑定（见下节） |
+| 什么都没有 | **领取** | 跑 `scripts/claim.mjs` 直领；领不到自动转 bot 深链（见下节） |
+| 只有 `pet-channel.json` | **读钥包** | v4 通道下它只是读钥，写会 `403 read_only`；别拿它写状态，按「读钥包」一节处理。仅 legacy（老）通道还能用它直接写 |
 
-## 多对一模式（包里有 pet-channel.json 时）
+脚本自己也会按同样的文件判断分流，`claim.mjs` / `write.mjs` 都不用你
+手工搬钥。
 
-这条通道已经在用户的 App 里连好了，你写进去的状态宠物立刻就能收到。
-一条通道可以分发给多个 Muse 共同写状态（多对一），宠物跟**最后写入**
-的一条状态走（seq 由服务器递增，不会写坏）。
+## 追加绑定模式（包里有 pet-bind.json）
 
-1. **落钥**：`pet-channel.json` 里的 `accesskey` 是明文通道钥，按凭证对待：
-   只落在你本机权限 600 的文件里（如你自己的钥目录），不回显、不贴聊天、
-   不写进日志、不提交仓库。其实写状态不必手工搬钥——下面的 `write.mjs`
-   会自己读 `pet-channel.json` 拿钥，你只要调它。
-2. **写状态**：用包内脚本，状态 JSON 作为参数传入：
+用户在 MusePet App 里点「添加 agent」后导出的 skill 包，根目录会带
+`pet-bind.json`（字段：`server_url`、`channel`、`binding_code`、
+`exported_at`、`note`）。绑定码一次性、约 24 小时过期、用过即废。
+
+1. 运行：
 
    ```
-   node scripts/write.mjs '{"state":"working","message":"正在查资料"}'
+   node scripts/claim.mjs
    ```
 
-   （默认读包根目录的 `pet-channel.json`；配置文件在别处时把路径放在
-   状态 JSON 前面：`node scripts/write.mjs <路径> '<状态 JSON>'`。）
-   脚本走公共中转写接口 `POST {server_url}/c/{channel}`、
-   `Authorization: Bearer <accesskey>`，只输出 HTTP 状态与 seq，
-   任何时候不打印钥。
-3. **接通验证**：先写一条
-   `{"state":"idle","event":"waking","message":"已连接"}`，
-   请用户确认宠物动了；之后按你的工作节奏在回合边界写状态即可。
+   脚本会：本地生成本 agent 自己的 writer secret → 算 sha256 →
+   `POST /bind-agent {bindingCode, writerSecretHash, label}` 消费绑定码
+   → secret 落本机 `keys/<channel>.key`（600）→ 用 secret 写一条
+   验证状态。stdout 只回 HTTP 与 seq，secret 永不输出。
+2. **退出码 0**：绑定完成。之后写状态直接用 `scripts/write.mjs`
+   （它默认从本地钥文件取 secret）。
+3. **绑定码已用/过期**（脚本会明确报这个错）：绑定码作废了，让用户回
+   App 重新点「添加 agent」导出一份新包，装好后再跑。不要反复重试
+   同一个旧包。
+4. 幂等：本机已有这条通道的 secret 时，脚本不会重复消费绑定码，
+   只做一次验证写入。
+
+## 领取模式（包里没有 pet-bind.json）
+
+运行：
+
+```
+node scripts/claim.mjs
+```
+
+（默认连 `https://pet.8529527.xyz`；可用环境变量 `PET_SERVER` 覆盖。）
+
+脚本先在本机生成 writer secret 并算好 sha256，然后分三路：
+
+### 路 1：直领成功（退出码 0）
+
+脚本 `POST /register {writerSecretHash, writerLabel}` 领到通道，当场
+用 secret 写第一条状态完成激活，然后 stdout 输出两行：摘要 + **通道码
+整串**（`hatchpet1:…`，里面是读钥）。把通道码**原样**交给用户，并告诉
+他：打开 MusePet App，把这一串粘进「通道」框，点连接即可。不要改动、
+不要截断。
+
+### 路 2：直领没领到 → bot 深链（脚本自动转入）
+
+名额满（`403 quota_full`）或其它领取类失败时，脚本会生成一次性
+**绑定码 B**，`POST /bind-start {bindCodeHash, writerSecretHash}` 把
+哈希预登记（24 小时有效），然后输出一条深链和给用户的话术。
+**把话术照原样转达给用户**（深链占位处换成脚本输出的那条）：
+
+> 直领名额暂时没领到，点这个链接走 bot 领：<深链>
+> 点链接 → 在 bot 里完成关注 → bot 会私聊发你通道码 → 粘进 App 连上 → 回来告诉我。
+
+深链形如 `https://t.me/MusePetBot?start=bind_<B>`。B 是 secret 派生的
+一次性绑定码，不是 secret 本身：链接可以转发，用过即废，也绑不出
+secret。
+
+输出深链后脚本**自动进入等待**：每约 15 秒轮询
+`POST /bind-status {bindCodeHash}`，最长约 10 分钟（可用
+`--poll-interval=毫秒` / `--poll-timeout=毫秒` 调）：
+
+- 状态变 `bound`：脚本把 secret 正式落到该通道的本地钥文件，用
+  secret 写一条状态验绑，报「绑定完成、通道已可写」。流程结束。
+- **超时（退出码 2）**：stdout 有一行 JSON（`state` 是当前状态）。
+  转告用户：完成 bot 那边步骤、把通道码粘进 App 后回来告诉你，你
+  **再跑一次 `claim.mjs` 即可续上**——脚本把待绑记录（含 secret 与
+  绑定码哈希）存在本地状态文件里，重跑会恢复轮询，不会重复生成
+  secret 或绑定码，也不会再占名额。
+- 状态 `expired`：绑定码过期，脚本已清掉待绑记录；重跑脚本重新走
+  一遍即可。
+
+### 路 3：失败（退出码 1）
+
+stderr 有带状态码的报错，转达大意即可。特别地：报「激活失败」说明
+通道订上了但第一条状态没写进去——**不要**给用户任何通道码；那条
+预订 48 小时后自动过期、名额回池，网络恢复后重跑脚本重新领。
+
+## 读钥包（包里只有 pet-channel.json）
+
+`pet-channel.json`（字段：`server_url`、`channel`、`accesskey`、
+`exported_at`、`note`）是从 App 复制/导出的现成通道配置。
+
+- **v4 通道**：里面的 `accesskey` 是**读钥**，只能连上看状态。
+  `write.mjs` 用它写会收到 `403 read_only` 并明确报错。想写状态，
+  必须走绑定：让用户在 App 里点「添加 agent」导出带 `pet-bind.json`
+  的新包，按追加绑定模式办。
+- **legacy 通道**（v4 之前的老通道，单钥读写）：仍可按旧法直接写，
+  `write.mjs` 会自动走这条路。
+
+## 写状态（绑定/领取完成后）
+
+```
+node scripts/write.mjs '{"state":"working","message":"正在查资料"}'
+```
+
+取钥顺序（脚本自动）：本地钥文件 `keys/<channel>.key` 的 writer
+secret → 包里有 `pet-bind.json` 就先绑定后写 → 包里有
+`pet-channel.json` 走 legacy 路径。多个通道时可用环境变量
+`PET_CHANNEL=<通道名>` 指定。输出只回 HTTP 状态与 seq。
 
 **状态协议**（写进通道的 body）：
 
@@ -76,51 +160,22 @@ skill 包时，若 App 里已经配好了一条通道，导出会把那条现成
 
 ## 前置条件
 
-无。只需要能联网、且有 Node ≥ 18 可运行包内脚本（`scripts/claim.mjs`、
-`scripts/write.mjs`，均零依赖）。
-
-## 流程（领取模式：包里没有 pet-channel.json 时）
-
-1. 运行：
-
-   ```
-   node scripts/claim.mjs
-   ```
-
-   （默认连 `https://pet.8529527.xyz`；测试或换服务器时可用环境变量
-   `PET_SERVER` 覆盖。）
-
-2. 按退出码与 stdout 分三路处理：
-
-   - **退出码 0（领取成功）**：stdout 有两行，第一行是摘要（通道名），
-     第二行是免费通道码本体，形如 `hatchpet1:xxxx…`。把**免费通道码整串原样**
-     发给用户，并告诉他：打开 MusePet App，把这一串粘进引导页/设置
-     里的「通道」框，点连接即可。不要改动、不要截断这串。
-   - **退出码 2（名额已满）**：stdout 第一行是 JSON
-     （`{"ok":false,"state":"full",...}`），后面跟着双路引导话术。
-     照话术原样转达给用户，二选一：
-     - 去 Telegram 找 **@MusePetBot**，按任务墙关注几个频道领兑换码，
-       回 App 引导页填码兑换；
-     - 自建中转：用 **relay-channel-setup** skill 在他自己的
-       Cloudflare 上部署一套专属中转（该 skill 的「MusePet 自建
-       变体」一节就是为这条路准备的）。
-     不要反复重跑脚本抢名额。
-   - **退出码 1（失败）**：stderr 有带状态码的报错。把报错大意转达
-     用户（网络问题、服务器异常等），稍后再试。特别地：如果报的是
-     「激活失败」，说明通道订上了但第一条状态没写进去——**不要**给
-     用户任何免费通道码；那条预订会在 48 小时后自动过期、名额回池，
-     不惩罚，网络恢复后重跑脚本重新领即可。
+无账号/凭证。只需要能联网、且有 Node ≥ 18 可运行包内脚本
+（`scripts/claim.mjs`、`scripts/write.mjs`，均零依赖）。
 
 ## 纪律（务必遵守）
 
-- **激活纪律**：通道领取只是「预订」，48 小时内没有第一条真实状态
-  写入就会作废、名额回池。本脚本已把「领到后立刻写第一条状态」做
-  进流程，不要绕开脚本手工调 `/register` 只拿通道不写状态。
-- **免费通道码按凭证对待**：免费通道码里含通道钥（base64 只是编码、不是
-  加密）。只把它交给用户本人粘进 App；不写进任何仓库、日志文件、
-  笔记或公开场合；脚本运行输出除最终免费通道码外不会出现钥明文，你
-  转达时也不要把钥单独拆出来贴。
+- **secret 纪律**：writer secret 原文**只存本机钥文件**
+  （`keys/<channel>.key`，权限 600，目录 `keys/`）。不回显、不贴
+  聊天、不写进日志、不提交仓库、不放进任何链接或通道码。脚本输出
+  只有 HTTP 状态与 seq，dbg 日志只记 server/channel/长度。
+- **激活纪律**：领取只是「预订」，48 小时内没有第一条真实状态写入
+  就会作废、名额回池。脚本已把「领到立刻写第一条」做进流程，不要
+  绕开脚本手工调 `/register` 只拿通道不写状态。
+- **通道码按凭证对待（弱版）**：通道码含读钥，只交给用户本人粘进
+  App，不写进仓库、笔记或公开场合。它被复制走最多只能看状态，
+  写权限在各 agent 本地的 secret 里，复制不走。
 - **一人一条**：给同一个用户领过一次就够了，不要批量领取囤积。
-- **pet-channel.json 按凭证对待**：包里有这个文件时，里面的 accesskey 是
-  现成通道的明文钥——只存本机 600 文件、只在用户自己的 Muse 之间传递；
-  用完这条通道就够，不要拿它再去领新通道，也不要把钥单独拆出来贴。
+  同一台宠物加多个 agent 走「添加 agent」绑定，不要重复领取。
+- **绑定码按一次性凭证对待**：`pet-bind.json` 与深链里的绑定码用过
+  即废、约 24 小时过期；不要把绑定码原文抄进日志或笔记。

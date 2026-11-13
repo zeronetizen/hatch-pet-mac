@@ -1,122 +1,229 @@
 #!/usr/bin/env node
-// HatchPet 公共中转 · 免费通道领取脚本（零依赖，Node >= 18）
+// MusePet 公共中转 · 通道领取/绑定脚本 v4（零依赖，Node >= 18）
 //
-// 流程：
-//   1. POST /register 向公共中转领取一条免费通道（预订）
-//   2. 拿到 key 后立刻 POST /c/<channel> 写第一条状态，完成激活
-//      （预订只有 48 小时窗口，第一条状态写入才算正式占住名额）
-//   3. 把配对三件套组装成免费通道码 hatchpet1:<base64url(JSON)> 输出到 stdout，
-//      交给用户粘进 HatchPet App
+// v4 凭证模型：writer secret 由本 agent 本地生成，原文只存本机
+// keys/<channel>.key（600），服务端只存它的 sha256 哈希；通道码退化为
+// 「服务器+通道名+读钥」，复制只能看、写不进去。写状态必须出示 secret 原文。
 //
-// 输出约定（智能体按这个解析）：
-//   - 成功：stdout 两行 —— 第一行人类可读摘要（只含通道名，不含 key），
-//     第二行就是免费通道码本体；退出码 0。
-//   - 满员（403 quota_full）：stdout 先打一行 JSON（{"ok":false,"state":"full",...}），
-//     后面跟给用户看的双路引导话术；退出码 2。
-//   - 其他失败：stderr 报错（带 HTTP 状态码），退出码 1，不输出免费通道码。
-// dbg 日志一律走 stderr，且任何时候都不打印 key 明文（最终免费通道码除外，
-// 那是它唯一的出口）。
+// 运行先分流（按包内文件判断）：
+//   A. 包根目录有 pet-bind.json → 追加绑定模式：本地生成 secret，
+//      POST /bind-agent 消费 App 导出的一次性绑定码，落钥后写验证状态。
+//   B. 本地有待绑记录（keys/pending-bind.json）→ 恢复轮询 /bind-status，
+//      不重复生成 secret/绑定码。
+//   C. 其余 → 领取模式：生成 secret，POST /register 带 writerSecretHash；
+//      成功组通道码交用户；失败（quota_full 或其它领取类失败）→ 生成绑定码 B，
+//      POST /bind-start 预登记哈希，输出 bot 深链，轮询 /bind-status 等绑定完成。
+//
+// 输出约定：
+//   - 成功：摘要行到 stdout，退出码 0。直领成功时第二行是通道码本体
+//     （通道码只含读钥，可交用户粘进 App）；secret 永不出现在任何输出里。
+//   - 绑定等待超时：stdout 一行 JSON {"ok":false,"state":<当前状态>,"pending":true}，退出码 2。
+//   - 绑定码已用/过期、其它失败：stderr 明确报错与指引，退出码 1，不输出通道码。
+// dbg 日志一律走 stderr，只记 server/channel/状态码/长度，永不记 secret/绑定码原文。
 'use strict';
 
-const SERVER = (process.env.PET_SERVER || 'https://pet.8529527.xyz').replace(/\/+$/, '');
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  SKILL_ROOT, serverFromEnv, genSecret, genBindingCode, sha256hex, agentLabel,
+  saveChannelSecret, savePendingBind, loadPendingBind, clearPendingBind,
+  postJson, writeStateRetry, bindViaBindFile,
+} from './petlib.mjs';
 
 function dbg(...args) { console.error('[claim]', ...args); }
 
-async function main() {
-  dbg('start server=' + SERVER);
+function parseArgs() {
+  const opts = {
+    pollIntervalMs: Number(process.env.PET_POLL_INTERVAL_MS || 15000),
+    pollTimeoutMs: Number(process.env.PET_POLL_TIMEOUT_MS || 600000),
+  };
+  for (const a of process.argv.slice(2)) {
+    let m;
+    if ((m = a.match(/^--poll-interval(?:-ms)?=(\d+)$/))) opts.pollIntervalMs = Number(m[1]);
+    else if ((m = a.match(/^--poll-timeout(?:-ms)?=(\d+)$/))) opts.pollTimeoutMs = Number(m[1]);
+    else if ((m = a.match(/^--wait(?:-ms)?=(\d+)$/))) opts.pollTimeoutMs = Number(m[1]);
+  }
+  if (!(opts.pollIntervalMs > 0)) opts.pollIntervalMs = 15000;
+  if (!(opts.pollTimeoutMs >= 0)) opts.pollTimeoutMs = 600000;
+  return opts;
+}
 
-  // ---- 1. 领取（预订）
+const FIRST_STATE = { state: 'idle', event: 'waking', message: '已连接' };
+
+// ---------- A. 追加绑定模式（pet-bind.json） ----------
+async function runBindAgent(bindPath) {
+  dbg('branch: bind-agent (pet-bind.json present)');
+  const r = await bindViaBindFile(bindPath, dbg);
+  if (!r.ok) {
+    if (r.kind === 'used_or_expired') {
+      console.error('绑定失败：绑定码已用或已过期（HTTP ' + r.status + ' ' + r.message + '）。'
+        + '请回 MusePet App 重新点「添加 agent」导出一份新的 skill 包（会带新的 pet-bind.json），装好后再跑本脚本。');
+    } else {
+      console.error('绑定失败：' + r.message);
+    }
+    process.exit(1);
+  }
+  console.log('已绑定通道 ' + r.channel + (r.already ? '（本地已有 secret，跳过重复消费绑定码）' : '')
+    + '，验证状态写入 HTTP ' + r.write.status + (r.write.seq !== undefined ? ' seq=' + r.write.seq : ''));
+  process.exit(0);
+}
+
+// ---------- C2. bot 深链等待：轮询 /bind-status ----------
+async function pollBindStatus(server, pending, secret, opts) {
+  const deadline = Date.now() + opts.pollTimeoutMs;
+  let lastState = 'pending';
+  for (;;) {
+    let r;
+    try {
+      r = await postJson(server, '/bind-status', { bindCodeHash: pending.bindCodeHash });
+    } catch (e) {
+      dbg('bind-status network error: ' + e.message);
+      r = null;
+    }
+    if (r) {
+      dbg('bind-status -> HTTP ' + r.status);
+      if (r.status !== 200) {
+        console.error('绑定查询失败：HTTP ' + r.status + (r.text ? ' ' + r.text.slice(0, 200) : '')
+          + '。待绑记录已存本地，稍后重跑本脚本即可续上。');
+        process.exit(1);
+      }
+      lastState = (r.json && r.json.state) || 'pending';
+      dbg('bind-status state=' + lastState + (r.json && r.json.channel ? ' channel=' + r.json.channel : ''));
+      if (lastState === 'bound') {
+        const channel = r.json && r.json.channel;
+        if (!channel) {
+          console.error('绑定查询返回 bound 但缺少 channel 字段，无法落钥。待绑记录已存本地，稍后重跑本脚本续上。');
+          process.exit(1);
+        }
+        saveChannelSecret(channel, server, secret, 'bot-bind', pending.label || agentLabel());
+        clearPendingBind();
+        const w = await writeStateRetry(server, channel, secret, FIRST_STATE, dbg);
+        if (w.status !== 200) {
+          console.error('绑定完成但验证状态写入失败：通道 ' + channel + ' HTTP ' + w.status
+            + '。secret 已存本地，稍后用 scripts/write.mjs 重写一条即可。');
+          process.exit(1);
+        }
+        console.log('绑定完成、通道已可写：通道 ' + channel + '，验证状态写入 HTTP ' + w.status
+          + (w.seq !== undefined ? ' seq=' + w.seq : ''));
+        process.exit(0);
+      }
+      if (lastState === 'expired') {
+        clearPendingBind();
+        console.error('绑定码已过期：这次的深链已失效。重跑本脚本会重新走一遍（直领或生成新深链）。');
+        process.exit(1);
+      }
+      // pending / linked：继续等（linked = bot 已记下用户，通道还没建好）
+    }
+    if (Date.now() >= deadline) {
+      console.log(JSON.stringify({ ok: false, state: lastState, pending: true }));
+      console.log('还在等绑定完成（当前状态：' + lastState + '）。你完成 bot 那边的步骤、把通道码粘进 App 连上之后，回来告诉我，我再跑一次本脚本就能续上——不用重新领，secret 和绑定码都存在本地了。');
+      process.exit(2);
+    }
+    await new Promise((res) => setTimeout(res, opts.pollIntervalMs));
+  }
+}
+
+// ---------- C. 领取模式 ----------
+async function runClaim(opts) {
+  const server = serverFromEnv();
+  dbg('branch: claim server=' + server);
+
+  // B. 恢复：本地已有待绑记录 → 直接续轮询，不重新生成 secret/绑定码
+  const pending0 = loadPendingBind();
+  if (pending0 && pending0.server_url === server) {
+    dbg('resume pending bind (created_at=' + (pending0.created_at || '?') + ')');
+    await pollBindStatus(server, pending0, pending0.secret, opts);
+    return; // pollBindStatus 内已 exit
+  }
+  if (pending0) clearPendingBind(); // 服务器变了，旧待绑作废
+
+  const secret = genSecret();
+  const writerSecretHash = sha256hex(secret);
+  const label = agentLabel();
+  dbg('generated writer secret secretLen=' + secret.length + ' hashLen=' + writerSecretHash.length + ' label=' + label);
+
+  // 1. 直领：POST /register 带 writerSecretHash
   let regRes;
   try {
-    regRes = await fetch(SERVER + '/register', { method: 'POST' });
+    regRes = await postJson(server, '/register', { writerSecretHash, writerLabel: label });
   } catch (e) {
-    console.error('领取失败：连不上公共中转（' + SERVER + '）：' + e.message);
+    console.error('领取失败：连不上公共中转（' + server + '）：' + e.message);
     process.exit(1);
   }
   dbg('register -> HTTP ' + regRes.status);
 
-  if (regRes.status === 403) {
-    let body = {};
-    try { body = await regRes.json(); } catch (e) { /* 忽略，走通用满员话术 */ }
-    if (body.error === 'quota_full') {
-      dbg('branch: quota_full');
-      console.log(JSON.stringify({
-        ok: false,
-        state: 'full',
-        error: 'quota_full',
-        paths: Array.isArray(body.paths) ? body.paths : ['bot', 'selfhost'],
-      }));
-      console.log('公共中转的免费名额已经领完了，还有两条路可以拿到通道：');
-      console.log('1）去 Telegram 找 @MusePetBot：按它的任务墙关注几个频道，bot 会发你一个一次性兑换码，回到 MusePet App 引导页填入兑换码即可。');
-      console.log('2）自建中转：用 relay-channel-setup skill，在你自己的 Cloudflare 上部署一套专属中转，数据完全自持，部署完同样会得到一条通道和自建通道码。');
-      process.exit(2);
+  if ((regRes.status === 201 || regRes.status === 200) && regRes.json && regRes.json.channel) {
+    const channel = regRes.json.channel;
+    const readKey = regRes.json.key;
+    saveChannelSecret(channel, server, secret, 'register', label);
+    dbg('register ok channel=' + channel + ' secret saved (key file 600)');
+    const w = await writeStateRetry(server, channel, secret, FIRST_STATE, dbg);
+    if (w.status !== 200) {
+      console.error('激活失败：通道 ' + channel + ' 已领到但第一条状态没写进去（HTTP ' + w.status + '）。'
+        + '先不要把任何东西粘进 App；这条预订会在 48 小时后自动过期、名额回池，网络恢复后重跑本脚本重新领即可。');
+      process.exit(1);
     }
-    console.error('领取失败：HTTP 403 ' + JSON.stringify(body));
-    process.exit(1);
-  }
-
-  if (regRes.status !== 201 && regRes.status !== 200) {
-    let text = '';
-    try { text = await regRes.text(); } catch (e) { /* ignore */ }
-    console.error('领取失败：HTTP ' + regRes.status + (text ? ' ' + text.slice(0, 200) : ''));
-    process.exit(1);
-  }
-
-  let reg;
-  try { reg = await regRes.json(); } catch (e) {
-    console.error('领取失败：服务器返回的不是合法 JSON（HTTP ' + regRes.status + '）');
-    process.exit(1);
-  }
-  const channel = reg.channel;
-  const channelKey = reg.key;
-  if (!channel || !channelKey) {
-    console.error('领取失败：服务器返回缺少 channel/key 字段');
-    process.exit(1);
-  }
-  dbg('register ok channel=' + channel + ' keyLen=' + String(channelKey).length);
-
-  // ---- 2. 当场写第一条状态，完成激活（失败重试，避免预订白占窗口）
-  const firstState = { state: 'idle', event: 'waking', message: '已连接' };
-  let writeOk = false;
-  let lastErr = '';
-  for (let attempt = 1; attempt <= 3 && !writeOk; attempt++) {
-    try {
-      const w = await fetch(SERVER + '/c/' + encodeURIComponent(channel), {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + channelKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(firstState),
-      });
-      dbg('activate write attempt ' + attempt + ' -> HTTP ' + w.status);
-      if (w.status === 200) { writeOk = true; break; }
-      lastErr = 'HTTP ' + w.status;
-    } catch (e) {
-      lastErr = e.message;
-      dbg('activate write attempt ' + attempt + ' error: ' + e.message);
+    dbg('activated channel=' + channel + ' seq=' + (w.seq !== undefined ? w.seq : '?'));
+    if (!readKey) {
+      console.error('领取成功但服务器没有返回读钥（key 字段），无法组通道码。通道 ' + channel + ' 已绑定本机 secret，可直接用 scripts/write.mjs 写状态；通道码请向服务端确认。');
+      process.exit(1);
     }
-    if (!writeOk && attempt < 3) await new Promise((r) => setTimeout(r, 800 * attempt));
+    const pairing = 'hatchpet1:' + Buffer.from(
+      JSON.stringify({ v: 1, server, channel, key: readKey }),
+      'utf8',
+    ).toString('base64url');
+    console.log('已领取并激活通道 ' + channel + '，把下面这一整串复制下来、粘进 MusePet App 的「通道」框：');
+    console.log(pairing);
+    process.exit(0);
   }
-  if (!writeOk) {
-    // 不输出免费通道码：没激活的通道粘进 App 也不会动。这条预订会在 48 小时后
-    // 自动过期、名额回池，不惩罚，稍后重跑本脚本即可。
-    console.error('激活失败：通道 ' + channel + ' 已预订但第一条状态没写进去（' + lastErr + '）。'
-      + '先不要把任何东西粘进 App；稍后网络恢复后重跑本脚本重新领取即可。');
+
+  // 2. 直领失败（quota_full 或其它领取类失败）→ bot 深链分支
+  const errName = regRes.json && regRes.json.error ? String(regRes.json.error) : '';
+  dbg('register failed branch: status=' + regRes.status + ' error=' + (errName || '(none)') + ' -> bind-start');
+  const B = genBindingCode();
+  const bindCodeHash = sha256hex(B);
+  let bs;
+  try {
+    bs = await postJson(server, '/bind-start', { bindCodeHash, writerSecretHash });
+  } catch (e) {
+    console.error('领取失败且绑定预登记也连不上中转（' + server + '）：' + e.message);
     process.exit(1);
   }
-  dbg('activated channel=' + channel);
+  dbg('bind-start -> HTTP ' + bs.status);
+  if (bs.status !== 200 && bs.status !== 201) {
+    console.error('绑定预登记失败：HTTP ' + bs.status + (bs.text ? ' ' + bs.text.slice(0, 200) : '') + '。稍后重跑本脚本再试。');
+    process.exit(1);
+  }
+  const pending = {
+    server_url: server,
+    bindCodeHash,
+    writerSecretHash,
+    label,
+    created_at: new Date().toISOString(),
+    note: 'bot-bind pending; secret in pending-bind.key (600)',
+  };
+  savePendingBind(pending, secret);
+  dbg('pending bind saved (hashes only in json; secret in key file 600)');
 
-  // ---- 3. 组装免费通道码并输出（key 只在这里出现一次）
-  const pairing = 'hatchpet1:' + Buffer.from(
-    JSON.stringify({ v: 1, server: SERVER, channel, key: channelKey }),
-    'utf8',
-  ).toString('base64url');
-  console.log('已领取并激活通道 ' + channel + '，把下面这一整串复制下来、粘进 MusePet App 的「通道」框：');
-  console.log(pairing);
+  const deepLink = 'https://t.me/MusePetBot?start=bind_' + B;
+  console.log('直领没领到（' + (errName || 'HTTP ' + regRes.status) + '），改走 bot 引导。把下面这条链接发给用户：');
+  console.log(deepLink);
+  console.log('给用户的话：点这个链接 → 在 bot 里完成关注 → bot 会私聊发你一条通道码 → 把通道码粘进 MusePet App 的「通道」框连上 → 回来告诉我一声，我这边会自动等绑定完成。');
+  await pollBindStatus(server, pending, secret, opts);
+}
+
+async function main() {
+  const opts = parseArgs();
+  dbg('start pollIntervalMs=' + opts.pollIntervalMs + ' pollTimeoutMs=' + opts.pollTimeoutMs);
+  const bindPath = path.join(SKILL_ROOT, 'pet-bind.json');
+  if (fs.existsSync(bindPath)) {
+    await runBindAgent(bindPath);
+    return;
+  }
+  await runClaim(opts);
 }
 
 main().catch((e) => {
-  console.error('领取失败：未预期错误：' + (e && e.message ? e.message : e));
+  console.error('失败：未预期错误：' + (e && e.message ? e.message : e));
   process.exit(1);
 });

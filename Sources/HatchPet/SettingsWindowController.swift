@@ -51,9 +51,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var lastTestOK: Bool?
     private var pairingField: NSTextField!
     private var copyPairingButton: NSButton!
-    /// 「导出 SKILL」按钮（v0.30）：与复制通道码/重新走引导同行；仅已配置通道时
-    /// 可见（未配置 hidden，显隐在 refreshConnectionStatus 里切换）
-    private var exportSkillButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
     private var proxyTypePopup: NSPopUpButton!
@@ -149,13 +146,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         reopenBtn.bezelStyle = .rounded
         reopenBtn.frame = NSRect(x: fieldX + 140, y: cursor - 28, width: 130, height: 28)
         content.addSubview(reopenBtn)
-        // 「导出 SKILL」（v0.30）：同行第三个按钮；仅已配置通道时可见（导出
-        // pet-claim 包、必带 pet-channel.json，给另一个 Muse 做多对一交接）
-        exportSkillButton = NSButton(title: "导出 SKILL", target: self, action: #selector(exportSkill))
-        exportSkillButton.bezelStyle = .rounded
-        exportSkillButton.frame = NSRect(x: fieldX + 280, y: cursor - 28, width: 108, height: 28)
-        exportSkillButton.isHidden = true // 显隐随配置状态在 refreshConnectionStatus 里切换
-        content.addSubview(exportSkillButton)
         cursor -= 34
         // 当前连接状态行（v0.21）：一行说清现状，随载入/应用通道码/测连接结果刷新
         connectionStatusLabel = NSTextField(labelWithString: "")
@@ -342,19 +332,17 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 「尚未配置通道」；已配置时按来源分称（v0.21 命名补充）——服务器是公共中转
     /// 时「当前连接：免费通道（<通道名>）」，否则「当前连接：自建通道（<通道名> ·
     /// <服务器域名>）」；尾巴状态取最近一次测连接结果（测过才带 · 已连接/连接失败）。
-    /// v0.30 附带：通道框回显当前通道名（未配置则清空回待粘贴）、「导出 SKILL」
-    /// 按钮仅已配置时可见。通道框正在编辑（用户准备粘新码）时不抢其内容。
+    /// v0.30 附带：通道框回显当前通道名（未配置则清空回待粘贴）。
+    /// 通道框正在编辑（用户准备粘新码）时不抢其内容。
     private func refreshConnectionStatus() {
         let cfg = ChannelSettings.load()
         let key = ChannelSettings.accessKey(for: cfg.channel) ?? ""
         guard !cfg.channel.isEmpty, !key.isEmpty else {
             connectionStatusLabel.stringValue = "尚未配置通道"
-            exportSkillButton.isHidden = true
             if pairingField.currentEditor() == nil { pairingField.stringValue = "" }
             PetLog.d("[pairing] 连接状态行：尚未配置通道 channel空=\(cfg.channel.isEmpty) keyPresent=\(!key.isEmpty)")
             return
         }
-        exportSkillButton.isHidden = false
         // 通道框直接显示当前通道名：免费通道即 free_…、自建即其通道名
         if pairingField.currentEditor() == nil { pairingField.stringValue = cfg.channel }
         var host = cfg.server
@@ -779,15 +767,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     @objc private func reopenOnboarding() {
         PetLog.d("[pairing] 设置页点「重新走引导」")
         onReopenOnboarding?()
-    }
-
-    /// 导出 SKILL（v0.30）：导出 pet-claim 包——本按钮仅已配置通道时可见，
-    /// SkillExport 会自动附 pet-channel.json（v0.29 分流），接收方跳过领取
-    /// 直接写状态，多对一交接。保存流程与引导页导出一致（同一 SkillExport）。
-    @objc private func exportSkill() {
-        PetLog.d("[pairing] 设置页点「导出 SKILL」（pet-claim 包，附 pet-channel.json 多对一）")
-        statusLabel.stringValue = SkillExport.export(package: "pet-claim",
-                                                     suggestedName: "pet-claim-skill.zip")
     }
 
     @objc private func openLandingPage() {

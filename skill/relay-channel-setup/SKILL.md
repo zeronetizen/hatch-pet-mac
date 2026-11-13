@@ -56,7 +56,7 @@ Cloudflare 免费额度对个人量级足够。
 ## 随包配置 pet-channel.json（可选，来自宠物 App 导出）
 
 有些分发包会在包根目录多一个 `pet-channel.json`——那是从宠物设置导出的现成
-通道配置（由 HatchPet 设置面板的「导出 skill 包」在导出时生成），字段：
+通道配置（由 MusePet 设置面板的「导出 skill 包」在导出时生成），字段：
 `server_url`、`channel`、`accesskey`、`exported_at`、`note`。
 
 - **按凭证对待**：里面的 accesskey 是明文通道钥。文件落盘权限设 600；不贴到
@@ -72,7 +72,7 @@ Cloudflare 免费额度对个人量级足够。
 - **想用自己的服务器**：无视 `pet-channel.json`，按上面「执行步骤」部署自己
   的服务；部署完成后建议删掉 `pet-channel.json`，避免两条通道混淆。
 
-## 宠物状态协议（给 HatchPet 桌宠写状态时遵守）
+## 宠物状态协议（给 MusePet 桌宠写状态时遵守）
 
 宠物的通道用 **state 模式**。通道搭好（或拿到 `pet-channel.json` 现成通道）之后，
 Muse 按本节协议往里写状态，桌宠就会跟着 Muse 的工作节奏动起来、冒泡说话。
@@ -171,11 +171,11 @@ RELAY_URL=<server_url> node relay.mjs write <channel> '<json>' --hmac
 - 错误码：401 钥不对/缺失，403 签名问题，404 通道不存在，409 条件写冲突，
   413 超 64KB，429 超限频。
 
-## HatchPet 自建变体（带邮箱）
+## MusePet 自建变体（带邮箱）
 
-当这个包是 HatchPet App 的自建面板导出的（包内带 `pet-owner.json`，模板见
+当这个包是 MusePet App 的自建面板导出的（包内带 `pet-owner.json`，模板见
 `pet-owner.json.example`）时，目标不是通用通道，而是：替用户在他自己的
-Cloudflare 上部署一套 relay、建第一条通道、把配对串给他粘回 HatchPet App。
+Cloudflare 上部署一套 relay、建第一条通道、把自建通道码给他粘回 MusePet App。
 流程如下：
 
 1. **读邮箱**：读包根目录的 `pet-owner.json`，取 `email` 字段。这是用户在
@@ -191,16 +191,16 @@ Cloudflare 上部署一套 relay、建第一条通道、把配对串给他粘回
    主钥落本机 `keys/`），服务地址形如 `https://relay.<子域>.workers.dev`。
 4. **建第一条通道**：用 `relay-admin.mjs create` 建一条 **state 模式**通道
    （通道名可用 `hatch-pet`），accesskey 由脚本落进本机 `keys/`，不要回显。
-5. **组装配对串给用户**：把三件套组装成与 pet-claim 同格式的配对串：
+5. **组装自建通道码给用户**：把三件套组装成与 pet-claim 同格式的自建通道码：
 
    ```
    hatchpet1: + base64url(JSON {"v":1,"server":<你的服务地址>,"channel":<通道名>,"key":<accesskey>})
    ```
 
    accesskey 从本机 `keys/<通道名>.key` 读出、只在内存里组装这一串，不要
-   把钥单独打印或落盘到别处。把配对串整串交给用户，告诉他：打开
-   HatchPet App，粘进引导页/设置里的配对框，点连接即可。配对串按凭证
+   把钥单独打印或落盘到别处。把自建通道码整串交给用户，告诉他：打开
+   MusePet App，粘进引导页/设置里的「通道」框，点连接即可。自建通道码按凭证
    对待，不写进任何仓库或日志文件。
-6. **验收**：按上文「验收方法」自测读写通过后，再把配对串交给用户；
+6. **验收**：按上文「验收方法」自测读写通过后，再把自建通道码交给用户；
    然后引导用户的智能体按 relay 的宠物状态协议开始往这条通道写状态
    （协议见上文「宠物状态协议」一节）。

@@ -1,4 +1,6 @@
-# Hatch Pet Relay Protocol v2
+# MusePet Relay Protocol v3
+
+Date: 2026-11-13
 
 A tiny state relay that lets an AI agent publish its working state to a
 floating desktop pet. One server, many isolated channels. Each channel holds
@@ -8,15 +10,45 @@ Public instance: `https://pet.8529527.xyz`
 Self-hosting: the same protocol — run the relay server (Node 18+, zero
 dependencies) behind any HTTPS endpoint. The channel protocol (read/write,
 state payload, pairing) is identical on the public instance and on
-self-hosted instances; the claim flow (`/status`, `/register`, `/redeem`)
-is provided by the public instance and is optional for self-hosted ones.
+self-hosted instances; the claim flow (`/status`, `/register`, and the bot
+binding flow under [Bot deep-link binding](#bot-deep-link-binding)) is
+provided by the public instance and is optional for self-hosted ones.
 
-What changed from v1: quota-based claiming with reservations
-(`POST /register` creates a `free_` reservation that must be activated by a
-first state write within 48 hours), a public read-only `GET /status`,
-one-time redemption codes (`POST /redeem`, creating `tg_` channels),
-a 16 KB state cap, tightened rate limits, and the pairing string format
-(`hatchpet1:` + base64url JSON) replacing the v1 three-line block.
+## What changed in v3 (from v2)
+
+- **Credential model v4 — read and write are split.** A channel is created
+  with one or more **writer secrets** bound to it (one per agent; the server
+  stores only each secret's SHA-256 hash). Writing state requires a writer
+  secret. The key inside the pairing string is demoted to a **read key**:
+  it can read and can never write. See [Pairing](#pairing) — this is the
+  most important semantic change in v3.
+- **State attribution.** Every accepted write is attributed to the writer
+  that sent it; the latest state's writer label is returned as `by` on
+  reads (and on write responses).
+- **`POST /register` may bind a writer at claim time**, via an optional
+  `writerSecretHash` (plus `writerLabel`); the response reports
+  `bound: true/false`.
+- **Bot binding uses a deep link, not a redemption code.** A claiming agent
+  pre-registers a binding with `POST /bind-start`, hands the user a
+  `https://t.me/MusePetBot?start=bind_<B>` deep link, and polls
+  `POST /bind-status`. The bot links the user's Telegram account and
+  creates the `tg_` channel directly (see
+  [Bot deep-link binding](#bot-deep-link-binding)).
+- **Code issuance and redemption are abolished.** `/admin/issue-code` and
+  `/redeem` return `410 { "error": "gone" }`. The claim string
+  (`hatchpet-code1:`) no longer exists: **the whole product now has exactly
+  one string, the pairing string (通道码)**.
+- **Management key and multiple agents per channel.** The pet app claims a
+  one-time **management key** on first connection, and can then issue
+  one-time binding codes to attach additional agents (one secret each);
+  any single agent can be unbound without affecting the others. See
+  [Management key and agents](#management-key-and-agents).
+- **New binding file `pet-bind.json`** carries an App-issued binding code
+  into an exported skill package. `pet-channel.json` is now a
+  legacy/read-only package (see [Binding files](#binding-files)).
+- **Legacy compatibility.** Channels with no writers bound keep the v2
+  single-key behaviour — their original key can still read *and* write.
+  See [Legacy channels](#legacy-channels).
 
 ## Concepts
 
@@ -24,18 +56,46 @@ a 16 KB state cap, tightened rate limits, and the pairing string format
   (letters, digits, `_`, `-`; max 64 chars). There are no user accounts.
   Name prefixes on the public instance indicate how the channel was claimed:
   - `free_…` — claimed directly via `/register` (counts against the free quota).
-  - `tg_…` — created by redeeming a one-time code via `/redeem`; the name is
-    derived deterministically from the claimant's Telegram account, so one
-    Telegram account maps to exactly one channel, forever.
+  - `tg_…` — created directly by the Telegram bot via
+    `/admin/create-tg-channel` during the deep-link binding flow; the name
+    is derived deterministically from the claimant's Telegram account, so
+    one Telegram account maps to exactly one channel, forever.
   - Any other name — created outside the claim flow (e.g. legacy or
     self-hosted setups); the wire protocol is the same.
-- **Key** — the channel's only credential, a 32-character random string.
-  The key *is* the identity: whoever holds it can read and write the channel.
-  The server stores only the SHA-256 hash. A channel's key is shown **once**,
-  in the response that creates the channel, and cannot be recovered if lost.
+- **Read key** — the channel's read credential, a 32-character random
+  string. This is the `key` carried inside the pairing string. On a v3
+  channel it grants **read access only** (plus claiming the management
+  key once — see below); presenting it as a write credential returns
+  `403 { "error": "read_only" }`. The server stores only its SHA-256 hash.
+  A channel's read key is shown **once**, in the response that creates the
+  channel, and cannot be recovered if lost.
+- **Writer secret** — the write credential, one per agent. The secret is
+  generated by the agent that will write; the original never leaves that
+  agent's local storage, never appears in a pairing string or a link, and
+  is never sent to the server — binding sends only its SHA-256 hash
+  (`writerSecretHash`, hex-encoded). A channel may have **N writer secrets
+  bound** (one per agent); the server stores only the hashes, each with an
+  optional label used for attribution (`by`). Presenting any bound secret
+  as `Authorization: Bearer <secret>` authorizes a write. Unbinding one
+  secret revokes only that agent.
+- **Management key** — a separate credential held only by the pet app,
+  used to authorize management operations (issuing binding codes, listing
+  and removing agents). It is claimed exactly once, after the app first
+  connects (see `POST /c/<channel>/mgmt-key`), is stored only in the app's
+  local key file, is never displayed, cannot be exported, and is **not**
+  part of the pairing string. The server stores only its SHA-256 hash.
+- **Binding codes** — two distinct one-time codes; do not confuse them:
+  - *Deep-link bind code* (`B`) — generated by a claiming agent for the
+    bot flow. The agent registers only its hash (`bindCodeHash`) via
+    `/bind-start`; the original `B` appears only as the `start` parameter
+    of the bot deep link. Valid 24 hours, single use.
+  - *Agent binding code* — issued by the app (management-authorized) via
+    `POST /c/<channel>/bind-codes` to attach one additional agent.
+    Valid 30 minutes, single use, and travels inside `pet-bind.json`.
 - **State** — a small JSON object (max 16 KB), replaced wholesale on each
   write. Every write increments the channel's `seq` by 1 (first write is
-  `seq` 1). Reads only ever return the latest state.
+  `seq` 1). Reads only ever return the latest state, together with the
+  label of the writer that produced it (`by`, when known).
 
 ## Endpoints
 
@@ -44,6 +104,11 @@ All error bodies are JSON: `{ "error": "<code>" }`. Common errors:
 (more than 64 requests in flight) — `503 { "error": "busy" }` for every
 endpoint except `/health`. Unknown paths return
 `404 { "error": "not_found" }`.
+
+New error codes introduced in v3, each documented at its endpoint below:
+`read_only`, `gone`, `bind_not_found`, `bind_already_claimed`,
+`bind_code_not_found`, `bind_code_expired`, `bind_code_used`,
+`secret_already_bound`, `mgmt_key_issued`.
 
 ### `GET /health`
 No auth. Returns
@@ -63,13 +128,30 @@ No auth, read-only. Reports the public instance's free-claim availability
 - Rate limit: the read bucket (300/min per IP).
 
 ### `POST /register` — claim a free channel (reservation)
-No auth, no body. Creates a `free_` channel in the **reserved** state and
-returns its key once:
+No auth. Creates a `free_` channel in the **reserved** state and returns
+its read key once. The optional JSON body binds a writer secret to the
+new channel at creation time:
+
+Request body (both fields optional):
+```json
+{ "writerSecretHash": "<sha256 hex of the writer secret>", "writerLabel": "claude-code" }
+```
+
+- `writerSecretHash` — hex-encoded SHA-256 of the writer secret the
+  claiming agent generated locally. The secret itself is never sent.
+- `writerLabel` — optional human-readable label for this writer, later
+  reported as `by` on its writes.
 
 Response `201`:
 ```json
-{ "channel": "free_ab12cd34ef", "key": "J8J0hR-…" }
+{ "channel": "free_ab12cd34ef", "key": "J8J0hR-…", "bound": true }
 ```
+
+- `key` is the channel's **read key** (see Concepts). It cannot write.
+- `bound`: `true` when a `writerSecretHash` was supplied and bound,
+  `false` when no hash was supplied (the channel is then unbound; a
+  writer can still be attached later through the bot flow or a binding
+  code — and until one is, the channel behaves as a legacy channel).
 
 - **Reservation → activation**: the reservation holds one quota slot for
   **48 hours**. The channel's first successful state write (see below)
@@ -79,61 +161,42 @@ Response `201`:
   Claiming agents must therefore write a first state immediately after
   claiming (see Write discipline).
 - **Quota full**: `403 { "error": "quota_full", "paths": ["bot", "selfhost"] }`
-  — the caller should fall back to the bot redemption flow or self-hosting.
+  — the caller should fall back to the bot deep-link binding flow or
+  self-hosting.
+- **Hash already bound**: if the same `writerSecretHash` is already bound
+  to this channel, `409 { "error": "secret_already_bound" }`.
 - Rate limits: 5/hour and 20/day per IP; exceeding either returns `429`.
 
-### `POST /redeem` — redeem a one-time code
-No bearer auth; the code itself is the credential. Codes are issued out of
-band (on the public instance: by the Telegram bot `@hatchPetBot` after a
-task-wall check). A code is 12 characters of Crockford Base32 (no I/L/O/U),
-bound to one Telegram account, and valid for **24 hours**.
-
-Request body:
-```json
-{ "code": "AB12CD34EF56", "tgId": "123456789" }
-```
-`tgId` is the Telegram user id the code was issued to (string or number).
-The code is case-insensitive (the server normalizes it to upper case).
-
-Response `201` (key shown once; the code is consumed and deleted):
-```json
-{ "channel": "tg_0123456789abcdef", "key": "J8J0hR-…" }
-```
-
-Errors:
-- `400 { "error": "bad_request" }` — missing/empty `code` or `tgId`,
-  or an unreadable body.
-- `400 { "error": "bad_json" }` — body is not valid JSON.
-- `413 { "error": "too_large" }` — body over 16 KB.
-- `404 { "error": "code_not_found" }` — no such code (or already redeemed).
-- `403 { "error": "code_revoked" }` — the code was revoked by the operator.
-- `400 { "error": "code_expired" }` — the code is past its 24-hour validity,
-  or was already marked expired.
-- `403 { "error": "tg_mismatch" }` — the code is bound to a different `tgId`.
-- `409 { "error": "already_claimed", "channel": "tg_…" }` — this Telegram
-  account already has its channel (one per account, ever). The code is
-  **not** consumed in this case.
-- `429 { "error": "rate_limited" }` — the write bucket (120/min per IP).
-
-The redeemed channel is a normal channel afterwards; its first state write
-activates it (it never counts against the free quota and never expires).
-
 ### `POST /c/<channel>` — write state
-Header: `Authorization: Bearer <key>`. Body: the state JSON (see below).
-Response `200`: `{ "seq": <n>, "ts": <epoch ms> }`.
+Header: `Authorization: Bearer <writer secret>`. The bearer value must be
+the **original of one of the channel's bound writer secrets** (the server
+hashes it and compares against the bound hashes). Body: the state JSON
+(see below).
+
+Response `200`: `{ "seq": <n>, "ts": <epoch ms>, "by": "<writerLabel>" }`
+(`by` echoes the label bound to the secret used, and is omitted when that
+writer has no label). The write is stored with this attribution.
 The first successful write on a channel also activates it (see `/register`).
 Errors:
-- `401 { "error": "unauthorized" }` — bad/missing key, or unknown channel
-  (the two are indistinguishable by design).
+- `403 { "error": "read_only" }` — the bearer value is the channel's
+  **read key**. On a v3 channel the pairing-string key can never write.
+- `401 { "error": "unauthorized" }` — bad/missing credential, an unbound
+  secret, or unknown channel (these are indistinguishable by design).
 - `413 { "error": "too_large" }` — body over 16 KB.
 - `400 { "error": "bad_json" }` — body is not valid JSON.
 - `400 { "error": "bad_request" }` — body could not be read.
 - `429 { "error": "rate_limited" }` — over 120 writes/min per IP.
 
+On legacy channels (no writers bound) the original channel key still
+writes — see [Legacy channels](#legacy-channels).
+
 ### `GET /c/<channel>?since=<seq>` — read state
-Header: `Authorization: Bearer <key>`.
+Header: `Authorization: Bearer <credential>`, where the credential may be
+the channel's **read key or any bound writer secret** — both may read.
 - If the channel's current `seq` is greater than `since`:
-  `200` with `{ "seq": <n>, "ts": <epoch ms>, "payload": <state> }`.
+  `200` with `{ "seq": <n>, "ts": <epoch ms>, "payload": <state>, "by": "<writerLabel>" }`.
+  `by` is the label of the writer that produced the latest state; it is
+  omitted when unknown (e.g. a legacy write made with the channel key).
 - Otherwise (including a channel with no writes yet): `204 No Content`
   (nothing new; cheap polling). `since` defaults to 0.
 Errors: `401 { "error": "unauthorized" }`,
@@ -141,12 +204,202 @@ Errors: `401 { "error": "unauthorized" }`,
 A wrong method on a `/c/…` path returns
 `405 { "error": "method_not_allowed" }`.
 
-Rate limits summary (per source IP): reads 300/min (channel reads and
-`/status`), writes 120/min (channel writes and `/redeem`),
-`/register` 5/hour and 20/day.
+### Bot deep-link binding
 
-(The server also has internal admin endpoints. They are authenticated,
-not part of this protocol, and are not documented here.)
+Used when direct claiming is unavailable (e.g. the free quota is full).
+The claiming agent drives the whole flow; the user only taps a link and
+pastes the pairing string the bot sends back.
+
+1. The agent generates its writer secret locally, and a random one-time
+   bind code `B`. It keeps both originals local.
+2. **`POST /bind-start`** — pre-register the binding (valid **24 hours**):
+   ```json
+   { "bindCodeHash": "<sha256 hex of B>", "writerSecretHash": "<sha256 hex of the writer secret>" }
+   ```
+   Only hashes are sent: `B` itself never goes to this endpoint, and the
+   writer secret itself never leaves the agent. Response `201`:
+   `{ "ok": true }`. Re-registering the same `bindCodeHash` while it is
+   still pending returns `409 { "error": "bind_already_claimed" }`.
+3. The agent hands the user the deep link, whose `start` parameter is the
+   bind code **original** `B` (and nothing else — never the secret, never
+   a hash):
+   ```
+   https://t.me/MusePetBot?start=bind_<B>
+   ```
+   The link may be forwarded, but `B` is single-use and binds nothing by
+   itself: at every later step the server works with `bindCodeHash` only.
+4. The user opens the link; the bot verifies the user (e.g. channel
+   membership) and calls `POST /admin/bind-tg` (below) to associate the
+   user's Telegram ID with the pending binding.
+5. **`POST /bind-status`** — the agent polls the binding's state:
+   Request: `{ "bindCodeHash": "<sha256 hex of B>" }`.
+   Response `200`: `{ "state": "<state>" }`, where `<state>` is one of:
+   - `pending` — pre-registered; the bot has not linked a Telegram
+     account yet.
+   - `linked` — a Telegram account is associated; the channel has not
+     been created yet.
+   - `bound` — the channel has been created with the pre-registered
+     `writerSecretHash` bound; the flow is complete and the agent may
+     write with its secret.
+   - `expired` — 24 hours passed without completion; start over with a
+     fresh `B`.
+   Errors: `404 { "error": "bind_not_found" }` — no binding for that
+   hash; `429 { "error": "rate_limited" }`.
+6. The bot creates the channel (next section) and **privately messages
+   the pairing string to the user**, who pastes it into the pet app.
+   That is the whole user-side flow — there is no redemption step.
+
+Admin endpoints for this flow are listed under
+[Admin endpoints](#admin-endpoints-operator-and-bot-only): the bot calls
+`POST /admin/bind-tg` with `{ "bindCodeHash": "…", "tgId": "…" }` to make
+the association (step 4), then `POST /admin/create-tg-channel` to create
+the `tg_` channel with the pre-registered writer hash bound, receiving
+the channel name and read key (shown once) to build the pairing string.
+
+**Walk-in users (no agent, no pre-registration):** the bot can create a
+channel for a user directly, without a pending binding. In that case the
+**server generates a writer secret**, returned exactly once to the bot,
+which delivers it to the user in the same private conversation, right
+after the pairing string. Whoever holds that secret can write; it is a
+credential and must be stored like one.
+
+### Management key and agents
+
+**Management authorization** for every endpoint in this section means the
+request carries `Authorization: Bearer <credential>` where the credential
+is the channel's **management key or any bound writer secret**. The read
+key alone is *not* management authorization.
+
+#### `POST /c/<channel>/mgmt-key` — claim the management key
+Header: `Authorization: Bearer <read key>`. The pet app calls this
+immediately after its **first successful connection** to a channel.
+Response `201`: `{ "mgmt_key": "<management key>" }` — shown exactly
+once; the server stores only its hash. The app stores it in its local
+key file, never displays it, and never exports it; it is not part of
+the pairing string.
+Errors:
+- `409 { "error": "mgmt_key_issued" }` — a management key has already
+  been claimed for this channel. There is no second claim; recovery is
+  via `POST /admin/reset-mgmt-key` (see Admin endpoints), after which
+  the key may be claimed again through this endpoint.
+- `401 { "error": "unauthorized" }` — bad/missing read key or unknown
+  channel.
+
+#### `POST /c/<channel>/bind-codes` — issue an agent binding code
+Management authorization required. Issues a **one-time** agent binding
+code, valid **30 minutes**, for attaching one additional agent.
+Response `201`: `{ "binding_code": "<code>", "expires_at": <epoch ms> }`.
+The app places the code into the `pet-bind.json` of an exported skill
+package (see [Binding files](#binding-files)).
+Errors: `401 { "error": "unauthorized" }` (no valid management
+credential), `429 { "error": "rate_limited" }`.
+
+#### `POST /bind-agent` — consume a binding code, attach an agent
+No bearer auth; the binding code itself is the credential. The new agent
+generates its own writer secret locally and sends only its hash:
+```json
+{ "bindingCode": "<code>", "writerSecretHash": "<sha256 hex>", "label": "hark" }
+```
+(`label` is optional; it becomes this writer's `by` attribution.)
+Response `201`: `{ "channel": "<channel>", "bound": true }`. The code is
+consumed and cannot be used again.
+Errors:
+- `404 { "error": "bind_code_not_found" }` — no such code.
+- `400 { "error": "bind_code_expired" }` — the code is past its
+  30-minute validity.
+- `409 { "error": "bind_code_used" }` — the code was already consumed.
+- `409 { "error": "secret_already_bound" }` — that `writerSecretHash` is
+  already bound to the channel.
+- `400 { "error": "bad_request" }` / `400 { "error": "bad_json" }` /
+  `413 { "error": "too_large" }` — malformed request, as elsewhere.
+- `429 { "error": "rate_limited" }` — the write bucket (120/min per IP).
+
+#### `GET /c/<channel>/agents` — list bound agents
+Management authorization required. Response `200`:
+```json
+{ "agents": [ { "index": 0, "label": "claude-code" }, { "index": 1, "label": "hark" } ] }
+```
+The list contains indexes and labels only — never secrets or hashes.
+Errors: `401 { "error": "unauthorized" }`,
+`429 { "error": "rate_limited" }`.
+
+#### `POST /c/<channel>/agents/remove` — unbind one agent
+Management authorization required. Request body: `{ "index": <n> }`,
+the index from the agents list. Response `200`: `{ "ok": true }`.
+The removed agent's secret immediately stops working for writes and
+management authorization; states it wrote earlier keep their `by`
+attribution, and all other agents are unaffected.
+Errors: `401 { "error": "unauthorized" }`,
+`404 { "error": "not_found" }` (no agent at that index),
+`429 { "error": "rate_limited" }`.
+
+### Admin endpoints (operator and bot only)
+
+Admin endpoints are authenticated with the server's **admin credential**
+(a separate operator credential — not a read key, writer secret, or
+management key). Normal clients and agents never call them, except where
+noted.
+
+- **`POST /admin/bind-tg`** — body `{ "bindCodeHash": "…", "tgId": "…" }`.
+  Associates a Telegram account with a pending deep-link binding (moves
+  it to state `linked`). Errors: `404 { "error": "bind_not_found" }`,
+  `409 { "error": "bind_already_claimed" }` (the binding is already
+  linked or bound).
+- **`POST /admin/create-tg-channel`** — body `{ "bindCodeHash": "…" }`
+  for the deep-link flow, or `{ "tgId": "…" }` for a walk-in user.
+  Creates the `tg_` channel (deterministic from `tgId`; one per Telegram
+  account, ever — a repeat for the same account returns
+  `409 { "error": "already_claimed", "channel": "tg_…" }`), binds the
+  pre-registered `writerSecretHash` when a binding is given (the binding
+  moves to state `bound` and is consumed), or generates a writer secret
+  when none is pre-registered. Response `201`:
+  `{ "channel": "tg_…", "key": "<read key>" }`, plus
+  `"writerSecret": "<secret>"` **only** in the server-generated case —
+  shown once, delivered to the user once by the bot, never stored in
+  plaintext server-side beyond its hash.
+- **`POST /admin/reset-mgmt-key`** — body `{ "channel": "<channel>" }`.
+  Clears the channel's management-key hash so the app can claim a fresh
+  key via `POST /c/<channel>/mgmt-key`. This is the recovery path for a
+  lost management key (e.g. the app's local data was wiped); in the
+  product flow it is triggered through the bot (the Telegram owner's
+  channel) or on behalf of an already-bound agent — never directly by an
+  unauthenticated caller.
+- **`POST /admin/issue-code`** — **removed.** Returns
+  `410 { "error": "gone" }`. Code issuance no longer exists.
+
+### Removed endpoints
+
+- **`POST /redeem`** — **removed.** Returns `410 { "error": "gone" }`.
+  There are no redemption codes and nothing to redeem: bot-created
+  channels are delivered as a ready pairing string (see
+  [Bot deep-link binding](#bot-deep-link-binding)).
+
+Rate limits summary (per source IP): reads 300/min (channel reads and
+`/status`), writes 120/min (channel writes, `/bind-agent`, and the other
+state-changing POSTs), `/register` 5/hour and 20/day, `/bind-start` and
+`/bind-status` share the `/register` bucket's spirit and return `429`
+when exceeded. Removed endpoints return `410` without further processing.
+
+## Legacy channels
+
+A **legacy channel** is any channel with **no writer secrets bound** —
+in practice, every channel created under protocol v2 (or under v3
+without a `writerSecretHash`). Legacy channels keep the v2 single-key
+semantics, unchanged:
+
+- The channel's original key is a combined read/write key: it may read
+  (`GET /c/<channel>`) and write (`POST /c/<channel>`) exactly as in v2,
+  and never returns `read_only`.
+- Writes made with the channel key have no writer attribution (reads
+  omit `by`).
+- The management-key claim, binding codes, and agent list work as
+  documented above; in particular, attaching the first writer secret is
+  possible through the bot flow or a binding code.
+
+As soon as a channel has at least one writer bound, it is a v3 channel
+in full: the key inside its pairing string is read-only for writes, and
+only bound secrets write. Clients must therefore check nothing — the
+server decides per channel, from whether its writers list is empty.
 
 ## State payload
 
@@ -168,8 +421,12 @@ not part of this protocol, and are not documented here.)
   then falls back to `state`. One of `null`, `"waking"`, `"milestone"`.
 - `message` (string, optional): a short human-readable note, ~40 characters
   max, shown as a speech bubble when the state changes.
-- `source` (string, optional): which agent/client wrote this state
-  (e.g. `"claude-code"`, `"hark"`). Lets several agents share one channel.
+- `source` (string, optional): a self-reported hint about which
+  agent/client wrote this state (e.g. `"claude-code"`, `"hark"`).
+  Lets several agents share one channel. Note the difference from `by`:
+  `source` is whatever the writer claims inside the payload, while `by`
+  is the server-verified label of the bound secret that performed the
+  write, carried outside the payload in read/write responses.
 - Unknown fields are ignored by the pet but preserved by the relay.
 
 ## Write discipline (for agents)
@@ -177,10 +434,12 @@ not part of this protocol, and are not documented here.)
 Write at meaningful boundaries, not on a timer:
 
 0. **Right after claiming** — a channel claimed via `/register` is only a
-   reservation until its first write. Immediately after claiming (or
-   redeeming), write one state (e.g. `idle` with a "connected" `message`)
-   to activate the channel; an unactivated `free_` reservation is deleted
-   after 48 hours.
+   reservation until its first write. Immediately after claiming, write
+   one state (e.g. `idle` with a "connected" `message`) **with the bound
+   writer secret** to activate the channel; an unactivated `free_`
+   reservation is deleted after 48 hours. (On the bot path the channel
+   is created already bound; the same first-write rule applies once the
+   binding reaches state `bound`.)
 1. **Task start** — `working` (or `making` when producing an artifact),
    with a `message` naming the task.
 2. **Milestone** — a phase completed: `event: "milestone"`, current `state`,
@@ -194,12 +453,28 @@ state (the `seq` only advances on real writes, and pets animate on change).
 
 ## Pairing
 
-To connect a pet (or another agent) to a channel, hand over a single
-**pairing string**:
+To connect a pet to a channel, hand over a single **pairing string**:
 
 ```
 hatchpet1:<base64url>
 ```
+
+Terminology: in user-facing text (the app, the landing page, and the
+skills) the pairing string is called the **通道码** ("channel code").
+This document keeps the technical term *pairing string*; the wire
+format and the `hatchpet1:` prefix are unchanged from v2.
+
+> **⚠ The one critical semantic change in v3:** the wire format did not
+> change, but the meaning of the `key` inside it did. On a v3 channel
+> that key is a **read key only** — it connects and observes the pet, and
+> it cannot write state; writing requires a bound writer secret, which
+> never travels in any string. Copying a pairing string therefore no
+> longer copies write access. **Old apps are unaffected**: the pet app
+> has only ever read (it polls `GET /c/<channel>`), and the read key
+> authorizes reads exactly as the v2 key did, so an un-updated app keeps
+> working against v3 channels without any change. (On legacy channels
+> the same key keeps its v2 read/write meaning — see
+> [Legacy channels](#legacy-channels).)
 
 The part after the `hatchpet1:` prefix is the base64url encoding
 (RFC 4648 §5, padding optional) of a UTF-8 JSON object:
@@ -221,61 +496,70 @@ Decoding and validation rules for clients:
 4. On success, store the key like a credential (OS keychain or equivalent)
    and discard the raw pairing string.
 
-Security notes: base64 is an encoding, **not** encryption — a pairing string
-is exactly as sensitive as the key itself. Never post it publicly, never
-log it, and only hand it to the pet app or agent it is meant for. (The
-pairing string is the only way to configure a connection in the client:
-settings show the current server / channel / masked key read-only, and
-changing the connection means applying a new pairing string. Manual entry
-of the three fields and the v1 three-line text block are superseded.)
+Security notes: base64 is an encoding, **not** encryption — a pairing
+string is exactly as sensitive as the read key itself. Never post it
+publicly, never log it, and only hand it to the pet app it is meant for.
+What changed in v3 is the blast radius: a leaked pairing string exposes
+the channel's state to a reader, but it cannot be used to write state,
+to claim the management key a second time, or to attach an agent.
+(The pairing string is the only way to configure a connection in the
+client: settings show the current server / channel / masked key read-only,
+and changing the connection means applying a new pairing string. Manual
+entry of the three fields and the v1 three-line text block are superseded.
+Immediately after a first successful connection, the app additionally
+claims the management key via `POST /c/<channel>/mgmt-key` — silently,
+with a retry on the next connection if the claim fails.)
 
-## Claim string
+## Binding files
 
-When the free quota is exhausted, users earn a redemption code through the
-pet bot (task wall). The bot hands the code over as a single **claim
-string**, so the user pastes one string into the app instead of copying a
-code and a numeric ID separately:
+### `pet-bind.json` — App "add agent" export
 
-```
-hatchpet-code1:<base64url>
-```
-
-The part after the `hatchpet-code1:` prefix is the base64url encoding
-(RFC 4648 §5, padding optional) of a UTF-8 JSON object:
+When the app exports a skill package for an additional agent, the package
+root carries a `pet-bind.json` holding the one-time agent binding code
+issued via `POST /c/<channel>/bind-codes`:
 
 ```json
-{ "v": 1, "code": "AB3K7M9PQX2Z", "tg": 123456789 }
+{
+  "server_url": "https://pet.8529527.xyz",
+  "channel": "free_ab12cd34ef",
+  "binding_code": "…",
+  "exported_at": "2026-11-13T12:00:00.000Z",
+  "note": "…"
+}
 ```
 
-Fields:
+Fields: `server_url` (relay base URL), `channel`, `binding_code` (the
+one-time code; expires 30 minutes after issue), `exported_at` (ISO 8601),
+`note` (free text for the recipient). The receiving agent reads the code,
+generates its own writer secret locally, and completes the binding with
+`POST /bind-agent` (sending only the secret's hash).
 
-- `v` — format version, the number `1`.
-- `code` — the 12-character redemption code issued by the server
-  (see `/redeem` above).
-- `tg` — the Telegram numeric user ID the code was issued to, as a
-  positive integer. The server binds each code to one Telegram account;
-  this value is what the client sends as `tgId` when redeeming.
+**Treat `pet-bind.json` as a credential**: until the code is consumed or
+expires, anyone holding the file can attach their own agent to the
+channel. Never post it publicly, never log the code, and transfer the
+package only to the agent it is meant for.
 
-Decoding and validation rules for clients:
+### `pet-channel.json` — legacy / read-only package
 
-1. Trim surrounding whitespace. The string must start with the literal,
-   case-sensitive prefix `hatchpet-code1:` — reject it otherwise.
-2. Base64url-decode the remainder and parse it as JSON. If decoding or
-   parsing fails, reject the whole string and do not send any request.
-3. The JSON must be an object with `v` equal to the number `1`, `code` a
-   non-empty string, and `tg` a positive integer. Unknown extra fields
-   are ignored (forward compatibility within v1).
-4. On success, call `POST /redeem` with `{ "code": <code>, "tgId": <tg> }`
-   and continue with the returned channel/key exactly like a pairing
-   (the app assembles the pairing internally and connects).
+Earlier flows distributed a channel as a `pet-channel.json` file with
+fields `server_url` / `channel` / `accesskey` / `exported_at` / `note`.
+Under v3 this is a **legacy, effectively read-only** package: on a v3
+channel its `accesskey` is just the read key — it authorizes reads, and
+writes with it return `403 { "error": "read_only" }`. Only on a legacy
+channel (no writers bound) can an `accesskey` still write.
+New distributions must not rely on `pet-channel.json` for write access;
+use writer-secret binding (`/register`, the bot flow, or `pet-bind.json`)
+instead.
 
-Claim string vs. pairing string: a claim string is a **pre-redemption**
-voucher — it carries no channel and no key, it is worthless once redeemed
-(the code is consumed on success), and it expires with the code (24 h).
-A pairing string is the **post-redemption** channel credential — it
-carries the long-lived channel key and must be stored and guarded like
-one. Never log a claim string in full; clients may log its length and
-the decode outcome only.
+## One string only
+
+The product has exactly **one** string format left: the pairing string
+(`hatchpet1:`, the 通道码). The v2 claim string (`hatchpet-code1:`) and
+its redemption flow are **abolished** in v3 — there is no pre-redemption
+voucher, no code-plus-ID paste step, and `/redeem` returns `410 gone`.
+Bot-created channels are delivered directly as a pairing string in a
+private bot message. Clients should reject any `hatchpet-code1:` string
+as unsupported rather than attempting a redemption request.
 
 Any client that can do HTTPS GET/POST with a bearer header can use the
 protocol directly (curl, a skill, an MCP tool, a few lines of any language).
