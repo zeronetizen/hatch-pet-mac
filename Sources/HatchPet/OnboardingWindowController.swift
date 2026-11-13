@@ -326,7 +326,7 @@ final class OnboardingWindowController: NSObject {
         case "code_expired": return "兑换失败：兑换码已过期（有效期 24 小时），回 bot 重新领一个新码。"
         case "code_revoked": return "兑换失败：这个码已被作废，回 bot 重新领一个。"
         case "tg_mismatch": return "兑换失败：这串领取串不是发给你的账号的（码与账号不匹配），回 bot 用你自己的账号重新领一串。"
-        case "already_claimed": return "这个 Telegram 账号已经领过通道了（一号一领）\(channel.map { "：\($0)" } ?? "")。请用当初的配对串连接，或在设置里手填那条通道。"
+        case "already_claimed": return "这个 Telegram 账号已经领过通道了（一号一领）\(channel.map { "：\($0)" } ?? "")。请用当初的配对串连接。"
         case "rate_limited": return "兑换失败：太频繁了，过一会儿再试。"
         case "busy": return "兑换失败：服务器繁忙，过一会儿再试。"
         case "bad_request", "bad_json": return "兑换失败：领取串内容格式不对，整串重新复制后重试。"

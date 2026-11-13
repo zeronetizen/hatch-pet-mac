@@ -223,10 +223,11 @@ Decoding and validation rules for clients:
 
 Security notes: base64 is an encoding, **not** encryption — a pairing string
 is exactly as sensitive as the key itself. Never post it publicly, never
-log it, and only hand it to the pet app or agent it is meant for. (Manual
-entry of the three fields — server, channel, key — remains available in
-client settings as a fallback, but the pairing string is the canonical
-interchange format. The v1 three-line text block is superseded.)
+log it, and only hand it to the pet app or agent it is meant for. (The
+pairing string is the only way to configure a connection in the client:
+settings show the current server / channel / masked key read-only, and
+changing the connection means applying a new pairing string. Manual entry
+of the three fields and the v1 three-line text block are superseded.)
 
 ## Claim string
 
