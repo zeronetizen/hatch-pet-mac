@@ -2,6 +2,11 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
+/// v0.31：① 粘码连接落盘后与引导页共用管理钥领取（MgmtService.claimMgmtKey，
+/// 老服务端静默跳过）；② 通道连接节之后新增「已绑定 agent」区——仅本机持有
+/// 当前通道管理钥时整区显示（无钥连标题都不渲染、高度不占，靠基线帧快照 +
+/// 窗高 delta 实现），区内名单（序号/label/绑定时间/解绑）随打开设置与连接
+/// 变化刷新，「添加 agent」领一次性绑定码后导出带 pet-bind.json 的绑定包。
 /// v0.30：按用户对 v0.29 设置页截图的逐条标注改——① 通道框已配置时直接显示
 /// 当前通道名（仍可粘新码换通道；内容未改就点「连接」时回「已是当前通道」）；
 /// ② 删 v0.29 新增的通道码展示行；③ 「复制通道码/重新走引导」同行加「导出
@@ -58,6 +63,19 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 「形象」小节每状态一行：来源字 + 恢复默认按钮（key 为状态本身）
     private var assetRows: [PetState: (source: NSTextField, reset: NSButton)] = [:]
     private var updateStatusLabel: NSTextField!
+    // MARK: 「已绑定 agent」区（v0.31）动态布局基线
+    /// 区容器（通道连接节之后插入；显隐与高度由 layoutAgentsSection 管理）
+    private var agentsContainer: NSView!
+    /// 最近一次成功拉到的名单（拉取失败时静默保留，见 refreshAgentsSection）
+    private var lastAgents: [AgentInfo] = []
+    /// 通道连接节各视图的建窗基线帧（minY 不低于连接状态行者）：区展开时整体上移 delta
+    private var agentsAboveViews: [(view: NSView, frame: NSRect)] = []
+    /// 区下方各视图的最高顶边（基线坐标）：容器底边锚在此处，下方视图永不移动
+    private var agentsBelowTop: CGFloat = 0
+    /// 建窗时窗口 frame 高（基线）：区展开时窗高 = 基线 + delta
+    private var agentsBaseFrameH: CGFloat = 0
+    /// 当前已施加的区展开量（0 = 整区不占高）
+    private var agentsDelta: CGFloat = 0
     /// 回填字段时置真，抑制 programmatic change 误触发即时应用（见 loadIntoFields）
     private var isLoading = false
     /// 最近一次已应用的控件快照（关窗时若与当前控件不一致，自动提交一次防丢失）
@@ -66,6 +84,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     func show() {
         let window = ensureWindow()
         loadIntoFields()
+        refreshAgentsSection(fetch: true)
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -280,6 +299,20 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         // v0.30：底部整行已删——左下角版本小字（与关于节版本重复）与右下角
         // 「关闭」按钮一并移除；关窗走标题栏关闭钮，关窗兜底见 windowWillClose。
 
+        // v0.31：「已绑定 agent」区布局基线——以连接状态行 minY 为界，其上
+        // 各视图记基线帧（区展开时整体上移），其下最高顶边记为容器锚点；
+        // 容器最后加入，不进基线快照。
+        let threshold = connectionStatusLabel.frame.minY
+        agentsAboveViews = content.subviews.compactMap { v in
+            v.frame.minY >= threshold ? (view: v, frame: v.frame) : nil
+        }
+        agentsBelowTop = content.subviews.filter { $0.frame.minY < threshold }
+            .map { $0.frame.maxY }.max() ?? 0
+        agentsBaseFrameH = win.frame.height
+        agentsContainer = NSView()
+        agentsContainer.isHidden = true
+        content.addSubview(agentsContainer)
+
         self.window = win
         return win
     }
@@ -336,6 +369,145 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
             connectionStatusLabel.stringValue = "当前连接：自建通道（\(cfg.channel) · \(host)）\(suffix)"
         }
         PetLog.d("[pairing] 连接状态行：\(connectionStatusLabel.stringValue)")
+    }
+
+    // MARK: - 「已绑定 agent」区（v0.31）
+
+    /// 整区显隐的唯一判据：本机持有当前通道的管理钥。无钥整区不出现
+    /// （连标题都不渲染、高度不占）。
+    private var agentsSectionVisible: Bool {
+        MgmtService.hasMgmtKey(channel: ChannelSettings.load().channel)
+    }
+
+    /// 区内容高：分隔+标题 30 + 每 agent 一行 32 + 「添加 agent」按钮行 36
+    private func agentsViewHeight() -> CGFloat {
+        66 + CGFloat(lastAgents.count) * 32
+    }
+
+    /// 按当前显隐与名单排区：展开时通道连接节整体上移 delta、窗高同步加
+    /// delta，下方各节原地不动，容器填入腾出的空档；收起时逆操作。
+    private func layoutAgentsSection() {
+        guard let win = window, agentsContainer != nil else { return }
+        guard agentsSectionVisible else {
+            if agentsDelta != 0 { applyAgentsDelta(0, win: win) }
+            agentsContainer.isHidden = true
+            PetLog.d("[mgmt] agents 区隐藏：本机未持有当前通道管理钥（整区不渲染）")
+            return
+        }
+        let viewH = agentsViewHeight()
+        let delta = viewH + 10
+        if abs(delta - agentsDelta) > 0.5 { applyAgentsDelta(delta, win: win) }
+        agentsContainer.frame = NSRect(x: 20, y: agentsBelowTop, width: 500, height: viewH)
+        agentsContainer.isHidden = false
+        rebuildAgentsContainer(viewH: viewH)
+        PetLog.d("[mgmt] agents 区显示：名单 \(lastAgents.count) 个，viewH=\(viewH) delta=\(agentsDelta)")
+    }
+
+    private func applyAgentsDelta(_ delta: CGFloat, win: NSWindow) {
+        for (view, base) in agentsAboveViews {
+            var f = base
+            f.origin.y = base.origin.y + delta
+            view.frame = f
+        }
+        var frame = win.frame
+        frame.size.height = agentsBaseFrameH + delta
+        win.setFrame(frame, display: true, animate: false)
+        agentsDelta = delta
+    }
+
+    /// 重建区内子视图：标题行 + 每 agent 一行（序号 · label · 绑定时间 +
+    /// 「解绑」按钮，tag=agent 序号）+ 底部「添加 agent」按钮。
+    private func rebuildAgentsContainer(viewH: CGFloat) {
+        agentsContainer.subviews.forEach { $0.removeFromSuperview() }
+        let sep = NSBox(frame: NSRect(x: 0, y: viewH - 5, width: 500, height: 1))
+        sep.boxType = .separator
+        agentsContainer.addSubview(sep)
+        let title = NSTextField(labelWithString: "已绑定 agent")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.frame = NSRect(x: 0, y: viewH - 30, width: 260, height: 18)
+        agentsContainer.addSubview(title)
+        for (i, agent) in lastAgents.enumerated() {
+            let rowY = viewH - 38 - CGFloat(i) * 32 - 28
+            let label = NSTextField(labelWithString: agent.rowText)
+            label.font = .systemFont(ofSize: 12)
+            label.lineBreakMode = .byTruncatingMiddle
+            label.frame = NSRect(x: 112, y: rowY + 5, width: 290, height: 18)
+            agentsContainer.addSubview(label)
+            let btn = NSButton(title: "解绑", target: self, action: #selector(unbindAgent(_:)))
+            btn.bezelStyle = .rounded
+            btn.tag = agent.index
+            btn.frame = NSRect(x: 410, y: rowY, width: 90, height: 28)
+            agentsContainer.addSubview(btn)
+        }
+        let addBtn = NSButton(title: "添加 agent", target: self, action: #selector(addAgentTapped))
+        addBtn.bezelStyle = .rounded
+        addBtn.frame = NSRect(x: 112, y: 4, width: 130, height: 28)
+        agentsContainer.addSubview(addBtn)
+    }
+
+    /// 打开设置/连接变化时调用：先按显隐排版，再（持有管理钥时）拉名单刷新；
+    /// 拉取失败静默保留上次名单（或空名单），不打扰用户。
+    private func refreshAgentsSection(fetch: Bool) {
+        layoutAgentsSection()
+        guard fetch, agentsSectionVisible else { return }
+        let cfg = ChannelSettings.load()
+        guard let mgmt = MgmtService.mgmtKey(channel: cfg.channel) else { return }
+        MgmtService.fetchAgents(server: cfg.baseURL, channel: cfg.channel, mgmtKey: mgmt, proxy: cfg.proxy) { [weak self] agents in
+            guard let self else { return }
+            if let agents { self.lastAgents = agents }
+            self.layoutAgentsSection()
+        }
+    }
+
+    @objc private func unbindAgent(_ sender: NSButton) {
+        let cfg = ChannelSettings.load()
+        guard let mgmt = MgmtService.mgmtKey(channel: cfg.channel) else { return }
+        let index = sender.tag
+        PetLog.d("[mgmt] 设置页点「解绑」channel=\(cfg.channel) index=\(index)")
+        MgmtService.removeAgent(server: cfg.baseURL, channel: cfg.channel, mgmtKey: mgmt, index: index, proxy: cfg.proxy) { [weak self] ok in
+            guard let self, ok else { return }
+            self.refreshAgentsSection(fetch: true)
+        }
+    }
+
+    /// 「添加 agent」：领一次性绑定码 → 导出 pet-claim 包，绑定码经
+    /// pet-bind.json 写进包根（字段 server_url/channel/binding_code/
+    /// exported_at/note）。绑定码与管理钥只进包/钥文件，不进日志与 UI 文案；
+    /// 导出反馈沿用 SkillExport 的导出完成提示口径。绑定包不附
+    /// pet-channel.json（见 SkillExport 的 includeChannelJSON 说明）。
+    @objc private func addAgentTapped() {
+        let cfg = ChannelSettings.load()
+        guard let mgmt = MgmtService.mgmtKey(channel: cfg.channel) else {
+            PetLog.d("[mgmt] 设置页点「添加 agent」拦截：本机未持有当前通道管理钥 channel=\(cfg.channel)")
+            return
+        }
+        PetLog.d("[mgmt] 设置页点「添加 agent」channel=\(cfg.channel)，先领 bind-codes 绑定码（码不记日志）")
+        MgmtService.createBindingCode(server: cfg.baseURL, channel: cfg.channel, mgmtKey: mgmt, proxy: cfg.proxy) { [weak self] result in
+            guard let self else { return }
+            guard let result else {
+                self.statusLabel.stringValue = "添加 agent 失败：领绑定码未成，请稍后重试。"
+                PetLog.d("[mgmt] 添加 agent 中止：bind-codes 未领到绑定码 channel=\(cfg.channel)")
+                return
+            }
+            let obj: [String: Any] = [
+                "server_url": cfg.baseURL,
+                "channel": cfg.channel,
+                "binding_code": result.code,
+                "exported_at": ISO8601DateFormatter().string(from: Date()),
+                "note": "此包用于追加绑定一个 agent：新 agent 装此 skill 后用包内绑定码完成绑定；绑定码一次性、短时有效，用过即废，只随此包传递、不要外传。",
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .prettyPrinted]),
+                  let text = String(data: data, encoding: .utf8) else {
+                self.statusLabel.stringValue = "添加 agent 失败：绑定文件组装出错。"
+                PetLog.d("[mgmt] 添加 agent 中止：pet-bind.json 组装失败 channel=\(cfg.channel)")
+                return
+            }
+            PetLog.d("[mgmt] pet-bind.json 已组装 channel=\(cfg.channel) codeLen=\(result.code.count)（码只进包、不记日志），开始导出绑定包")
+            self.statusLabel.stringValue = SkillExport.export(package: "pet-claim",
+                                                              suggestedName: "pet-claim-skill.zip",
+                                                              extraFiles: ["pet-bind.json": text + "\n"],
+                                                              includeChannelJSON: false)
+        }
     }
 
     // MARK: - 代理小节
@@ -645,6 +817,12 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
                                 intervalSec: cur.intervalSec, proxy: cur.proxy)
         ChannelSettings.save(cfg)
         KeyFileStore.save(key: parsed.key, channel: parsed.channel)
+        // v0.31 管理钥领取：与引导页共用同一领取点（落盘之后），异步静默；
+        // 领取完成回调刷新「已绑定 agent」区（新通道名单作废重拉）
+        lastAgents = []
+        MgmtService.claimMgmtKey(server: parsed.server, channel: parsed.channel, readKey: parsed.key, proxy: cur.proxy) { [weak self] in
+            self?.refreshAgentsSection(fetch: true)
+        }
         window?.makeFirstResponder(nil) // 先收编辑态，下面的回显与状态刷新才稳定
         pairingField.stringValue = parsed.channel // 回显新通道名，与刷新口径一致
         lastTestOK = nil

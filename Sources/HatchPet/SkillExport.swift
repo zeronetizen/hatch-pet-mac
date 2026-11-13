@@ -19,16 +19,23 @@ enum SkillExport {
     /// 导出一个 skill 包。extraFiles：包根目录相对文件名 → 内容（如 pet-owner.json）。
     /// 返回给用户看的结果文案（成功含路径），全程记 dbg 日志。
     static func export(package: String, suggestedName: String,
-                       extraFiles: [String: String] = [:]) -> String {
+                       extraFiles: [String: String] = [:],
+                       includeChannelJSON: Bool = true) -> String {
         guard let template = templateDir(package) else {
             PetLog.d("[skill-export] 失败 package=\(package)：Bundle 内无模板")
             return "导出失败：应用内未找到 \(package) 的 skill 模板。"
         }
         // v0.29 分流：已配置通道 → 附 pet-channel.json（调用方已显式给的同名
         // 文件优先，不覆盖）；未配置 → 不附。
+        // v0.31：绑定包（pet-bind.json）导出时 includeChannelJSON=false——该包
+        // 的用途是让新 agent 走绑定流程，附现成通道文件会让接收方跳过绑定
+        // 直接写状态，与绑定语义冲突，故显式不附。
         var extras = extraFiles
-        if extras["pet-channel.json"] == nil, let json = petChannelJSON() {
+        if includeChannelJSON, extras["pet-channel.json"] == nil, let json = petChannelJSON() {
             extras["pet-channel.json"] = json
+        }
+        if !includeChannelJSON {
+            PetLog.d("[skill-export] 本次导出不附 pet-channel.json（绑定包专用，package=\(package)）")
         }
         let fm = FileManager.default
         let staging = fm.temporaryDirectory

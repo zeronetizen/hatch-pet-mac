@@ -13,12 +13,23 @@ enum KeyFileStore {
         return base.appendingPathComponent("MusePet/keys", isDirectory: true)
     }
 
-    /// 通道名 → 文件名：只保留 [A-Za-z0-9._-]，其余字符换成 "_"，防路径穿越。
-    private static func fileURL(for channel: String) -> URL {
+    /// 通道名 → 安全文件名基：只保留 [A-Za-z0-9._-]，其余字符换成 "_"，防路径穿越。
+    private static func safeName(for channel: String) -> String {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
         let safe = channel.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
         let name = String(safe).trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        return keysDirectory.appendingPathComponent("\(name.isEmpty ? "channel" : name).key")
+        return name.isEmpty ? "channel" : name
+    }
+
+    /// 通道读钥文件：<channel>.key
+    private static func fileURL(for channel: String) -> URL {
+        keysDirectory.appendingPathComponent("\(safeName(for: channel)).key")
+    }
+
+    /// 管理钥文件（v0.31）：<channel>.mgmt.key——与通道读钥同目录、文件名区分，
+    /// 同样 600 权限；只存本机、不显示、不能导出、不进通道码（见 MgmtService）。
+    private static func mgmtFileURL(for channel: String) -> URL {
+        keysDirectory.appendingPathComponent("\(safeName(for: channel)).mgmt.key")
     }
 
     private static func ensureDirectory() -> Bool {
@@ -62,6 +73,37 @@ enum KeyFileStore {
             PetLog.d("钥文件保存 channel=\(channel) 成功（len=\(key.count)，权限 600）")
         } catch {
             PetLog.d("钥文件保存 channel=\(channel) 失败：\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - 管理钥（v0.31，<channel>.mgmt.key）
+
+    static func loadMgmtKey(channel: String) -> String? {
+        let url = mgmtFileURL(for: channel)
+        guard let data = try? Data(contentsOf: url),
+              let raw = String(data: data, encoding: .utf8) else {
+            PetLog.d("[mgmt] mgmt 钥文件读取 channel=\(channel) 无记录（\(url.lastPathComponent) 不存在或不可读）")
+            return nil
+        }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            PetLog.d("[mgmt] mgmt 钥文件读取 channel=\(channel) 文件为空，视为未保存")
+            return nil
+        }
+        PetLog.d("[mgmt] mgmt 钥文件读取 channel=\(channel) 成功（len=\(value.count)，内容不记日志）")
+        return value
+    }
+
+    static func saveMgmtKey(key: String, channel: String) {
+        guard ensureDirectory() else { return }
+        let url = mgmtFileURL(for: channel)
+        let fm = FileManager.default
+        do {
+            try Data(key.utf8).write(to: url, options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            PetLog.d("[mgmt] mgmt 钥文件保存 channel=\(channel) 成功（len=\(key.count)，文件 \(url.lastPathComponent)，权限 600）")
+        } catch {
+            PetLog.d("[mgmt] mgmt 钥文件保存 channel=\(channel) 失败：\(error.localizedDescription)")
         }
     }
 
