@@ -11,6 +11,9 @@ v0.6 起不用系统钥匙串、v0.20 起设置不再提供三字段手填），
 通道）与 `relay-channel-setup`（在自己的 Cloudflare 上一键部署一套同样的
 通道服务）。
 
+**v0.22 起**：领码 bot 已迁移至 **@MusePetBot**（原 @hatchPetBot 已删除停用），
+引导页 bot 面板与随仓 skill 的跳转/文案已同步换新；频道 @HatchPetChannel 未改名。
+
 分支策略：`main` 分支在正式就绪前保持只有 README，开发全部在 `dev` 分支，
 构建也只由 `dev` 的推送（或手动 Run workflow）触发。
 

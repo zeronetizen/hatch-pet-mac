@@ -3,7 +3,7 @@ import AppKit
 /// 首启引导窗（v0.18）：未配置通道+钥时由 AppDelegate 弹出，设置里也可经
 /// 「重新走引导」再开。打开即 GET /status 分流：
 /// - open → 领取面板（导出领取 skill 包 + 通道码粘贴连接）
-/// - full → bot 面板（跳 @hatchPetBot + 领取串单输入兑换）
+/// - full → bot 面板（跳 @MusePetBot + 领取串单输入兑换）
 /// - 查失败 → 提示重试，通道码粘贴与自建面板仍可用，不堵死
 /// 两态常显自建面板（邮箱 → 生成带 pet-owner.json 的自建 skill 包）。
 /// 连接成功 = 落盘配置 + 存钥 + 回调 AppDelegate 重启轮询，随后关窗。
@@ -262,8 +262,8 @@ final class OnboardingWindowController: NSObject {
     }
 
     @objc private func openBot() {
-        PetLog.d("[onboarding] 打开 https://t.me/hatchPetBot")
-        NSWorkspace.shared.open(URL(string: "https://t.me/hatchPetBot")!)
+        PetLog.d("[onboarding] 打开 https://t.me/MusePetBot")
+        NSWorkspace.shared.open(URL(string: "https://t.me/MusePetBot")!)
     }
 
     // MARK: - 兑换
