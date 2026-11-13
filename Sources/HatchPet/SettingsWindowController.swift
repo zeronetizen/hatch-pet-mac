@@ -2,6 +2,8 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
+/// v0.29：状态行下方加一行当前通道码展示（只读单行框 + 「复制」按钮，由已存
+/// 配置当场拼整串；未配置时整行隐藏），供主人取用分发（多对一）。
 /// v0.27：通道码框设死单行（maximumNumberOfLines=1、cell usesSingleLineMode、
 /// 不换行可横滚，与引导页同口径）；v0.26 的字数提示文案全部去掉，粘贴清洗
 /// 保留但无声。连接行本就是一行横排（标签+框+连接），不改。
@@ -37,6 +39,10 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var lastTestOK: Bool?
     private var pairingField: NSTextField!
     private var copyPairingButton: NSButton!
+    /// 当前通道码展示行（v0.29）：标签 + 只读单行框 + 复制按钮；未配置时三件全隐藏
+    private var currentCodeLabel: NSTextField!
+    private var currentCodeField: NSTextField!
+    private var copyCodeButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
     private var proxyTypePopup: NSPopUpButton!
@@ -67,9 +73,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         // 窗口高度按光标驱动布局的总 decrement 定：内容排满后底部留约 60 给
         // 关闭按钮区；超过屏幕可视高时按屏幕收。
         let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
-        // v0.25：再删代理说明行（-36）与形象说明行（-36），窗高从 782 收到 710
-        // （其余 decrement 与 v0.23 相同，总 630，内容底边停在 60）
-        let W: CGFloat = 540, H: CGFloat = min(710, visibleH - 16)
+        // v0.29：加通道码展示行（-36），窗高从 710 涨到 746（总 decrement 666，
+        // 内容底边仍停在 60）；v0.25 时曾删代理/形象说明行各 -36
+        let W: CGFloat = 540, H: CGFloat = min(746, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -127,6 +133,27 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         connectionStatusLabel.frame = NSRect(x: fieldX, y: cursor - 20, width: fieldW, height: 20)
         content.addSubview(connectionStatusLabel)
         cursor -= 30
+
+        // 当前通道码展示行（v0.29）：已配置时把已存 server+channel+钥当场拼成
+        // 整串、只读单行展示，供主人取用分发（多对一）；未配置时整行隐藏
+        // （布局位置恒定预留，显隐在 refreshConnectionStatus 里切换）。
+        currentCodeLabel = addLabel("通道码", top: cursor)
+        currentCodeField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 88, height: 24))
+        currentCodeField.isEditable = false
+        currentCodeField.isSelectable = true
+        currentCodeField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        // 单行属性同其他码框：不换行、不撑高，长串框内横向滚动/裁剪
+        currentCodeField.maximumNumberOfLines = 1
+        currentCodeField.cell?.usesSingleLineMode = true
+        currentCodeField.cell?.wraps = false
+        currentCodeField.cell?.isScrollable = true
+        currentCodeField.lineBreakMode = .byClipping
+        content.addSubview(currentCodeField)
+        copyCodeButton = NSButton(title: "复制", target: self, action: #selector(copyPairing))
+        copyCodeButton.bezelStyle = .rounded
+        copyCodeButton.frame = NSRect(x: fieldX + fieldW - 80, y: cursor - 26, width: 80, height: 28)
+        content.addSubview(copyCodeButton)
+        cursor -= 36
 
         // 轮询间隔
         _ = addLabel("轮询间隔", top: cursor)
@@ -299,14 +326,25 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 「尚未配置通道」；已配置时按来源分称（v0.21 命名补充）——服务器是公共中转
     /// 时「当前连接：免费通道（<通道名>）」，否则「当前连接：自建通道（<通道名> ·
     /// <服务器域名>）」；尾巴状态取最近一次测连接结果（测过才带 · 已连接/连接失败）。
+    /// 同时刷新 v0.29 的通道码展示行显隐与内容（未配置隐藏、已配置拼整串）。
     private func refreshConnectionStatus() {
         let cfg = ChannelSettings.load()
         let key = ChannelSettings.accessKey(for: cfg.channel) ?? ""
         guard !cfg.channel.isEmpty, !key.isEmpty else {
             connectionStatusLabel.stringValue = "尚未配置通道"
+            // v0.29：未配置时通道码展示行整行隐藏、内容清空（不留钥残串）
+            currentCodeLabel.isHidden = true
+            currentCodeField.isHidden = true
+            copyCodeButton.isHidden = true
+            currentCodeField.stringValue = ""
             PetLog.d("[pairing] 连接状态行：尚未配置通道 channel空=\(cfg.channel.isEmpty) keyPresent=\(!key.isEmpty)")
             return
         }
+        // v0.29：已配置时当场拼出当前通道码整串展示（复制走既有 copyPairing）
+        currentCodeLabel.isHidden = false
+        currentCodeField.isHidden = false
+        copyCodeButton.isHidden = false
+        currentCodeField.stringValue = PairingString.encode(server: cfg.baseURL, channel: cfg.channel, key: key)
         var host = cfg.server
         for scheme in ["https://", "http://"] where host.hasPrefix(scheme) {
             host = String(host.dropFirst(scheme.count))

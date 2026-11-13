@@ -1,6 +1,6 @@
 ---
 name: pet-claim
-description: 给 MusePet 桌面宠物在公共中转（pet.8529527.xyz）领取一条免费通道。当用户装了 MusePet、还没有通道、想用官方公共中转时使用：运行包内脚本领取并当场激活通道，拿到免费通道码交给用户粘进 App 即完成配对。
+description: 给 MusePet 桌面宠物接上公共中转通道。包根目录有 pet-channel.json 时走多对一：跳过领取、直接用那条现成通道写状态；没有时运行包内脚本领取一条免费通道（公共中转 pet.8529527.xyz），拿到免费通道码交给用户粘进 App 完成配对。
 ---
 
 # MusePet 免费通道领取
@@ -14,11 +14,72 @@ MusePet 桌面宠物靠一条「中转通道」接收智能体的状态。官方
 - 脚本拿到通道后**当场写第一条状态完成激活**，然后输出一串免费通道码；
 - 你把免费通道码原样交给用户，用户粘进 MusePet App 的「通道」框，配对结束。
 
+本 skill 有两种工作模式，动手前先按下节分流。
+
+## 先分流：包里有没有 pet-channel.json
+
+先看本包**根目录**有没有 `pet-channel.json`。用户从 MusePet App 导出
+skill 包时，若 App 里已经配好了一条通道，导出会把那条现成通道的配置附在
+包根目录（字段：`server_url`、`channel`、`accesskey`、`exported_at`、`note`）：
+
+- **有 → 多对一模式**：不要运行 `claim.mjs`、不要再领新通道（会白占名额）。
+  按下面「多对一模式」一节，直接用这条现成通道写状态。
+- **没有 → 领取模式**：按下面「流程」一节运行 `claim.mjs` 领取新通道。
+
+## 多对一模式（包里有 pet-channel.json 时）
+
+这条通道已经在用户的 App 里连好了，你写进去的状态宠物立刻就能收到。
+一条通道可以分发给多个 Muse 共同写状态（多对一），宠物跟**最后写入**
+的一条状态走（seq 由服务器递增，不会写坏）。
+
+1. **落钥**：`pet-channel.json` 里的 `accesskey` 是明文通道钥，按凭证对待：
+   只落在你本机权限 600 的文件里（如你自己的钥目录），不回显、不贴聊天、
+   不写进日志、不提交仓库。其实写状态不必手工搬钥——下面的 `write.mjs`
+   会自己读 `pet-channel.json` 拿钥，你只要调它。
+2. **写状态**：用包内脚本，状态 JSON 作为参数传入：
+
+   ```
+   node scripts/write.mjs '{"state":"working","message":"正在查资料"}'
+   ```
+
+   （默认读包根目录的 `pet-channel.json`；配置文件在别处时把路径放在
+   状态 JSON 前面：`node scripts/write.mjs <路径> '<状态 JSON>'`。）
+   脚本走公共中转写接口 `POST {server_url}/c/{channel}`、
+   `Authorization: Bearer <accesskey>`，只输出 HTTP 状态与 seq，
+   任何时候不打印钥。
+3. **接通验证**：先写一条
+   `{"state":"idle","event":"waking","message":"已连接"}`，
+   请用户确认宠物动了；之后按你的工作节奏在回合边界写状态即可。
+
+**状态协议**（写进通道的 body）：
+
+```json
+{"state": "working", "event": null, "message": "正在查资料"}
+```
+
+- `state`（必填，常驻状态，只有三个）：`idle` 待机/在等用户；
+  `working` 处理中（思考、查资料、跑工具）；`making` 在产出
+  （写代码/文件、构建、生成内容）。`sleeping` 永远不要写——宠物超时
+  没收到更新会自己变暗装睡，一有新写入就醒。
+- `event`（一次性事件，只有两个，没有给 `null` 或省略）：`waking`
+  会话开始/中断恢复时写一次；`milestone` 完成一件完整任务时写一次
+  （事件动画播一遍后回落到 `state`，带 event 时 `state` 填播完后应
+  停留的状态，通常是 `idle`）。
+- `message`：一句人话短摘要，建议 ≤40 字；写了且 seq 变化时宠物会
+  冒泡显示。任务完成时写结果摘要，被卡住时写在等什么。
+- 写时机：会话开始 `{"state":"idle","event":"waking"}`；开始干活
+  `{"state":"working"}`；开始产出 `{"state":"making"}`；任务完成
+  `{"state":"idle","event":"milestone","message":"<结果摘要>"}`；
+  等用户决策 `{"state":"idle","message":"在等：<什么>"}`。
+- 节流：同一 `state` 不要重复写；连续两次写至少间隔约 10 秒；
+  长任务每约 2 分钟重写一次当前 `state` 防失联变暗。
+
 ## 前置条件
 
-无。只需要能联网、且有 Node ≥ 18 可运行 `scripts/claim.mjs`（零依赖）。
+无。只需要能联网、且有 Node ≥ 18 可运行包内脚本（`scripts/claim.mjs`、
+`scripts/write.mjs`，均零依赖）。
 
-## 流程
+## 流程（领取模式：包里没有 pet-channel.json 时）
 
 1. 运行：
 
@@ -60,3 +121,6 @@ MusePet 桌面宠物靠一条「中转通道」接收智能体的状态。官方
   笔记或公开场合；脚本运行输出除最终免费通道码外不会出现钥明文，你
   转达时也不要把钥单独拆出来贴。
 - **一人一条**：给同一个用户领过一次就够了，不要批量领取囤积。
+- **pet-channel.json 按凭证对待**：包里有这个文件时，里面的 accesskey 是
+  现成通道的明文钥——只存本机 600 文件、只在用户自己的 Muse 之间传递；
+  用完这条通道就够，不要拿它再去领新通道，也不要把钥单独拆出来贴。

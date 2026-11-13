@@ -4,6 +4,9 @@ import UniformTypeIdentifiers
 /// skill 包导出共用件（v0.18）：把 .app 内置模板（Contents/Resources/skill/<包名>）
 /// 拷到临时目录、按需写附加文件、弹保存框打 zip。引导页的两个导出（领取包 /
 /// 自建包）共用；设置页原有的「导出当前通道」沿用其自身流程。
+/// v0.29 导出分流（多对一）：App 已配置通道时，包根目录自动附 pet-channel.json
+/// （现成通道配置，接收方跳过领取直接写状态）；未配置则不附、保持领取版。
+/// 两个包同一规则，字段与 relay-channel-setup skill 内 spec 一致。
 enum SkillExport {
     /// 模板目录（assemble 时拷入 Contents/Resources/skill/）；缺失返回 nil。
     static func templateDir(_ package: String) -> URL? {
@@ -21,6 +24,12 @@ enum SkillExport {
             PetLog.d("[skill-export] 失败 package=\(package)：Bundle 内无模板")
             return "导出失败：应用内未找到 \(package) 的 skill 模板。"
         }
+        // v0.29 分流：已配置通道 → 附 pet-channel.json（调用方已显式给的同名
+        // 文件优先，不覆盖）；未配置 → 不附。
+        var extras = extraFiles
+        if extras["pet-channel.json"] == nil, let json = petChannelJSON() {
+            extras["pet-channel.json"] = json
+        }
         let fm = FileManager.default
         let staging = fm.temporaryDirectory
             .appendingPathComponent("hatchpet-skill-export-\(UUID().uuidString)", isDirectory: true)
@@ -32,7 +41,7 @@ enum SkillExport {
                 try fm.copyItem(at: template.appendingPathComponent(item),
                                 to: pkgDir.appendingPathComponent(item))
             }
-            for (name, content) in extraFiles {
+            for (name, content) in extras {
                 try content.write(to: pkgDir.appendingPathComponent(name),
                                   atomically: true, encoding: .utf8)
                 PetLog.d("[skill-export] 附加文件已写入 package=\(package) file=\(name)")
@@ -69,6 +78,34 @@ enum SkillExport {
         }
         PetLog.d("[skill-export] 成功 package=\(package) 路径=\(dest.path)")
         return "已导出到：\(dest.path)——把整个包交给你的智能体即可。"
+    }
+
+    /// 已配置通道时组装 pet-channel.json 内容（v0.29）：字段与 relay-channel-setup
+    /// skill 内 spec 一致——server_url/channel/accesskey/exported_at/note。
+    /// 未配置（通道名为空或本机钥文件无钥）返回 nil。accesskey 从钥文件读，
+    /// 只随返回值进组包写进 zip，绝不进日志（此处只记通道名）。
+    private static func petChannelJSON() -> String? {
+        let cfg = ChannelSettings.load()
+        guard !cfg.channel.isEmpty,
+              let key = ChannelSettings.accessKey(for: cfg.channel), !key.isEmpty else {
+            PetLog.d("[skill-export] 未配置通道，导出不附 pet-channel.json")
+            return nil
+        }
+        let obj: [String: Any] = [
+            "server_url": cfg.baseURL,
+            "channel": cfg.channel,
+            "accesskey": key,
+            "exported_at": ISO8601DateFormatter().string(from: Date()),
+            "note": "由 MusePet App 导出：这条通道已在 App 里连好。接收方跳过领取、直接用这条通道写状态（多对一）；accesskey 是明文通道钥，按凭证对待，只存本机 600 文件、不外传。",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj,
+                                                     options: [.sortedKeys, .prettyPrinted]),
+              let text = String(data: data, encoding: .utf8) else {
+            PetLog.d("[skill-export] pet-channel.json 组装失败 channel=\(cfg.channel)")
+            return nil
+        }
+        PetLog.d("[skill-export] 已配置通道 channel=\(cfg.channel)，导出附 pet-channel.json（钥只进 zip、不记日志）")
+        return text + "\n"
     }
 
     private static func runTool(_ path: String, _ args: [String], currentDir: String? = nil) -> Bool {

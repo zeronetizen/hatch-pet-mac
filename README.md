@@ -52,6 +52,14 @@ lineLimit=1），长串只占一行、绝不撑高，卡片布局不动；v0.26 
 常，反而掩盖了此问题）。已改为与设置页一致的 `payload` 优先、`data` 兜
 底；自建 Worker 中转不受影响。
 
+**v0.29 起**：多对一与导出分流——设置页「通道连接」节状态行下方显示当前
+通道码整串（只读单行 + 复制按钮，未配置不显示），主人可把一串通道码分发
+给多个 Muse 共同写状态（宠物跟最后写入走）；从引导页导出 skill 包时，
+App 已配置通道则包根目录附 `pet-channel.json`（server_url/channel/
+accesskey/exported_at/note，字段以 relay-channel-setup skill 内 spec 为
+准），接收方跳过领取直接写状态（pet-claim 新增 `scripts/write.mjs`），
+未配置则不附、保持领取版。
+
 分支策略：`main` 分支在正式就绪前保持只有 README，开发全部在 `dev` 分支，
 构建也只由 `dev` 的推送（或手动 Run workflow）触发。
 
