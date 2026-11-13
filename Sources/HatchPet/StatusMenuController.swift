@@ -46,7 +46,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
                 PetLog.d("菜单栏图标已设为 idle 形象图（status-icon，彩色非模板）")
             } else {
                 button.image = NSImage(systemSymbolName: "pawprint.fill",
-                                       accessibilityDescription: "HatchPet")
+                                       accessibilityDescription: "MusePet")
                 button.image?.isTemplate = true
                 PetLog.d("菜单栏图标资源缺失，回退爪印 SF Symbol")
             }
@@ -150,7 +150,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let quitItem = NSMenuItem(title: "退出 HatchPet",
+        let quitItem = NSMenuItem(title: "退出 MusePet",
                                   action: #selector(quit(_:)),
                                   keyEquivalent: "q")
         quitItem.target = self

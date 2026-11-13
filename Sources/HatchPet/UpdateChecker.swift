@@ -113,7 +113,7 @@ enum UpdateChecker {
                         version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
                         versionParts: parts,
                         tag: tag,
-                        title: "HatchPet \(tag)",
+                        title: "MusePet \(tag)",
                         notes: "",
                         zipURL: downloadURL(forTag: tag),
                         publishedAt: "")
@@ -234,7 +234,7 @@ enum UpdateChecker {
                 version: entry.tag.hasPrefix("v") ? String(entry.tag.dropFirst()) : entry.tag,
                 versionParts: parts,
                 tag: entry.tag,
-                title: entry.title.isEmpty ? "HatchPet \(entry.tag)" : entry.title,
+                title: entry.title.isEmpty ? "MusePet \(entry.tag)" : entry.title,
                 notes: plainText(fromHTML: entry.contentHTML),
                 zipURL: downloadURL(forTag: entry.tag),
                 publishedAt: entry.updated)
@@ -276,7 +276,7 @@ enum UpdateChecker {
 
     private static func presentUpdatePrompt(_ info: ReleaseInfo) {
         let alert = NSAlert()
-        alert.messageText = "发现 HatchPet 新版本 v\(info.version)"
+        alert.messageText = "发现 MusePet 新版本 v\(info.version)"
         var notes = info.notes.trimmingCharacters(in: .whitespacesAndNewlines)
         if notes.isEmpty { notes = "（该版本未附说明，详情见仓库 README 的版本小节）" }
         if notes.count > 600 { notes = String(notes.prefix(600)) + "…" }

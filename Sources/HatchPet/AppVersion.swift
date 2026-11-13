@@ -8,6 +8,6 @@ enum AppVersion {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "HatchPet v\(short) (build \(build))"
+        return "MusePet v\(short) (build \(build))"
     }
 }

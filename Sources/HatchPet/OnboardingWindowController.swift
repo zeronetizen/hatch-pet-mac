@@ -39,14 +39,14 @@ final class OnboardingWindowController: NSObject {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
-        win.title = "HatchPet 引导"
+        win.title = "MusePet 引导"
         win.isReleasedWhenClosed = false
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
         win.contentView = content
         let X: CGFloat = 20, FW: CGFloat = W - 40
         var cursor = H - 20
 
-        let title = NSTextField(labelWithString: "欢迎使用 HatchPet")
+        let title = NSTextField(labelWithString: "欢迎使用 MusePet")
         title.font = .systemFont(ofSize: 16, weight: .semibold)
         title.frame = NSRect(x: X, y: cursor - 24, width: FW, height: 24)
         content.addSubview(title)

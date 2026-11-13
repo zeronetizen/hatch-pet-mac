@@ -68,7 +68,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
-        win.title = "HatchPet 设置"
+        win.title = "MusePet 设置"
         win.isReleasedWhenClosed = false
         win.delegate = self // 关窗前把未提交的文本编辑自动提交一次（见 windowWillClose）
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Hatch 悬浮宠物</string>
+	<string>MusePet</string>
 	<key>CFBundleExecutable</key>
 	<string>HatchPet</string>
 	<key>CFBundleIconFile</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.nonzero.hatchpet.mac</string>
 	<key>CFBundleName</key>
-	<string>HatchPet</string>
+	<string>MusePet</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
