@@ -81,6 +81,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     func show() {
         let window = ensureWindow()
         loadIntoFields()
+        MgmtService.ensureMgmtKey() // v0.33：打开设置即触发持续领取（已持有则无操作）
         refreshAgentsSection(fetch: true)
         window.center()
         NSApp.activate(ignoringOtherApps: true)
@@ -104,6 +105,11 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         win.title = "MusePet 设置"
         win.isReleasedWhenClosed = false
         win.delegate = self // 关窗前把未提交的文本编辑自动提交一次（见 windowWillClose）
+        // v0.33：管理钥在设置打开期间被持续重试领到时，即时刷出 agent 区
+        NotificationCenter.default.addObserver(forName: MgmtService.keyReadyNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.refreshAgentsSection(fetch: true)
+        }
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
         win.contentView = content
 

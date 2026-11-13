@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let clickThrough = defaults.bool(forKey: DefaultsKey.clickThrough)
         panel.ignoresMouseEvents = clickThrough
         panel.orderFrontRegardless()
+        MgmtService.ensureMgmtKey() // v0.33：启动即触发管理钥持续领取（未配置/已持有时无操作）
         (renderer.contentView as? PetContentView)?.dragger.onDragEnd = { [weak self] in
             guard let self else { return }
             self.savePosition()

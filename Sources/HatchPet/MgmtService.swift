@@ -17,7 +17,9 @@ struct AgentInfo {
 /// 管理接口客户端（v0.31，凭证模型 v4 的 App 侧关节）：
 /// - 领取管理钥：POST {server}/c/{channel}/mgmt-key，Bearer=通道读钥 →
 ///   201 {mgmtKey}（仅发一次，存本机 <channel>.mgmt.key，600）；409 = 服务端
-///   已领过（视为已有，不报错）；404/网络失败 = 老服务端没有此端点，静默
+///   已领过（视为已有，不报错）。v0.33 起领取改持续重试：启动/打开设置/
+///   粘码连接都触发 ensure，网络失败等非终态按 10s→30s→60s 退避重试到
+///   领到为止（详见 ensureMgmtKey）；404 同样排重试（服务端恢复即自愈）。
 ///   跳过、待下次连接成功时重试。管理钥只进钥文件，日志只记长度。
 /// - 管理操作一律 Bearer 管理钥：GET .../agents 名单、POST .../agents/remove
 ///   {index} 解绑、POST .../bind-codes 领一次性绑定码 {bindingCode, expiresAt}。
@@ -27,15 +29,89 @@ enum MgmtService {
 
     // MARK: - 管理钥领取（连接成功后共用）
 
+    /// 领到管理钥后广播（设置窗开着时据此即时刷出 agent 区）
+    static let keyReadyNotification = Notification.Name("MusePetMgmtKeyReady")
+
+    /// v0.33 持续重试状态：claimInFlight 防并发重复领取（NSLock 保护，领取
+    /// 可从任意线程发起）；retryWork 是已排队的下一次重试（只在主队列动）；
+    /// retryStep 决定退避档位（10s→30s→60s 封顶、不限次数，直到领到）。
+    private static let claimLock = NSLock()
+    private static var claimInFlight = false
+    private static var retryWork: DispatchWorkItem?
+    private static var retryStep = 0
+
+    /// 持续领取的总入口（v0.33）：App 启动、打开设置、粘码连接都经这里。
+    /// 本机已持有 → 收尾（取消待重试）返回；未持有 → 发起领取，失败由
+    /// claimMgmtKey 内部排退避重试。终态停重试：本机已有钥，或服务端
+    /// 409 且本机无钥（钥已被别处领走、走找回流程，重试解不了）。
+    static func ensureMgmtKey() {
+        DispatchQueue.main.async {
+            let cfg = ChannelSettings.load()
+            guard !cfg.channel.isEmpty,
+                  let readKey = ChannelSettings.accessKey(for: cfg.channel), !readKey.isEmpty else {
+                PetLog.d("[mgmt] ensure 跳过：未配置通道或本机无读钥")
+                return
+            }
+            if hasMgmtKey(channel: cfg.channel) {
+                cancelRetry()
+                return
+            }
+            claimMgmtKey(server: cfg.baseURL, channel: cfg.channel, readKey: readKey, proxy: cfg.proxy)
+        }
+    }
+
+    private static func cancelRetry() {
+        retryWork?.cancel()
+        retryWork = nil
+        retryStep = 0
+    }
+
+    /// 排下一次重试：到点后按「届时的当前配置」重领——配置已变就领新通道、
+    /// 已领到就停，不拿旧参数硬打。
+    private static func scheduleRetry() {
+        let delays: [TimeInterval] = [10, 30, 60]
+        let delay = delays[min(retryStep, delays.count - 1)]
+        retryStep += 1
+        retryWork?.cancel()
+        let work = DispatchWorkItem {
+            let cfg = ChannelSettings.load()
+            guard !cfg.channel.isEmpty,
+                  let readKey = ChannelSettings.accessKey(for: cfg.channel), !readKey.isEmpty,
+                  !hasMgmtKey(channel: cfg.channel) else {
+                PetLog.d("[mgmt] 重试到点但已领到或配置已变/已清空，停")
+                cancelRetry()
+                return
+            }
+            PetLog.d("[mgmt] mgmt-key 重试领取 channel=\(cfg.channel) step=\(retryStep)")
+            claimMgmtKey(server: cfg.baseURL, channel: cfg.channel, readKey: readKey, proxy: cfg.proxy)
+        }
+        retryWork = work
+        PetLog.d("[mgmt] mgmt-key 已排重试：\(Int(delay))s 后（step=\(retryStep)）")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     /// 连接落盘成功后异步领取管理钥。completion 在主队列回调（无论成败），
     /// 供设置页据此刷新「已绑定 agent」区显隐；引导页可不传。
+    /// v0.33：结果分三类记账——done（201 领到 / 409 但本机已有）停重试并
+    /// 广播 keyReadyNotification；terminal（409 且本机无钥）停重试；其余
+    /// （网络失败、404、其他状态码）排退避持续重试。
     static func claimMgmtKey(server: String, channel: String, readKey: String,
                              proxy: ProxyConfig, completion: (() -> Void)? = nil) {
+        claimLock.lock()
+        if claimInFlight {
+            claimLock.unlock()
+            PetLog.d("[mgmt] mgmt-key 已有领取在途，跳过重复发起 channel=\(channel)")
+            DispatchQueue.main.async { completion?() }
+            return
+        }
+        claimInFlight = true
+        claimLock.unlock()
         let base = normalizedBase(server)
         PetLog.d("[mgmt] mgmt-key 领取开始 channel=\(channel) server=\(base)（Bearer=读钥，钥不记日志）")
         guard let url = URL(string: "\(base)/c/\(channel)/mgmt-key") else {
             PetLog.d("[mgmt] mgmt-key 领取跳过：服务器地址拼不出 URL server=\(base)")
-            completion?()
+            claimLock.lock(); claimInFlight = false; claimLock.unlock()
+            DispatchQueue.main.async { scheduleRetry(); completion?() }
             return
         }
         var request = URLRequest(url: url)
@@ -44,26 +120,40 @@ enum MgmtService {
         request.setValue("Bearer \(readKey)", forHTTPHeaderField: "Authorization")
         send(request, proxy: proxy) { data, http, error in
             defer { DispatchQueue.main.async { completion?() } }
+            var outcome = "retry"
             if http == 201,
                let obj = jsonObject(data),
                let mgmtKey = obj["mgmtKey"] as? String, !mgmtKey.isEmpty {
                 KeyFileStore.saveMgmtKey(key: mgmtKey, channel: channel)
                 PetLog.d("[mgmt] mgmt-key 领取成功 channel=\(channel) mgmtKeyLen=\(mgmtKey.count)，已存本机 mgmt 钥文件")
-                return
-            }
-            if http == 409 {
+                outcome = "done"
+            } else if http == 409 {
                 if KeyFileStore.loadMgmtKey(channel: channel) != nil {
                     PetLog.d("[mgmt] mgmt-key 已领过（409）channel=\(channel)，本机已存 mgmt 钥，视为已有")
+                    outcome = "done"
                 } else {
                     PetLog.d("[mgmt] mgmt-key 已领过（409）channel=\(channel)，但本机未存 mgmt 钥——记一条 dbg 待找回（走 bot 或已绑 agent 的 secret），不向用户报错")
+                    outcome = "terminal"
                 }
-                return
+            } else if http == 404 {
+                PetLog.d("[mgmt] mgmt-key 端点不存在（404）channel=\(channel)：老服务端或通道不存在，排重试待恢复")
+                outcome = "retry"
+            } else {
+                PetLog.d("[mgmt] mgmt-key 领取未成 channel=\(channel) http=\(http) err=\(errDesc(error))：排退避重试（v0.33 起不再一次了事）")
+                outcome = "retry"
             }
-            if http == 404 {
-                PetLog.d("[mgmt] mgmt-key 端点不存在（404）channel=\(channel)：老服务端，静默跳过待下次连接重试")
-                return
+            DispatchQueue.main.async {
+                claimLock.lock(); claimInFlight = false; claimLock.unlock()
+                switch outcome {
+                case "done":
+                    cancelRetry()
+                    NotificationCenter.default.post(name: keyReadyNotification, object: nil)
+                case "terminal":
+                    cancelRetry()
+                default:
+                    scheduleRetry()
+                }
             }
-            PetLog.d("[mgmt] mgmt-key 领取未成 channel=\(channel) http=\(http) err=\(errDesc(error))：静默待下次连接重试（老服务端或网络失败均如此）")
         }
     }
 
