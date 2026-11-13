@@ -2,14 +2,15 @@ import Foundation
 
 /// accesskey 的存放处：本机应用数据目录下的钥文件（自 v0.6 起，不再用系统钥匙串——
 /// 钥匙串在自签名应用上会弹权限提示，自用场景没必要）。
-/// 路径：~/Library/Application Support/HatchPet/keys/<channel>.key
+/// 路径：~/Library/Application Support/MusePet/keys/<channel>.key
 /// 目录权限 700、文件权限 600；内容就是钥原文（读时 trim）。绝不进 UserDefaults。
 /// 所有操作记日志（只记通道名/长度/结果，不记钥内容）。
+/// （v0.25 起目录名由 HatchPet 改为 MusePet；测试阶段不迁移旧目录。）
 enum KeyFileStore {
-    /// 钥目录：~/Library/Application Support/HatchPet/keys
+    /// 钥目录：~/Library/Application Support/MusePet/keys
     static var keysDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("HatchPet/keys", isDirectory: true)
+        return base.appendingPathComponent("MusePet/keys", isDirectory: true)
     }
 
     /// 通道名 → 文件名：只保留 [A-Za-z0-9._-]，其余字符换成 "_"，防路径穿越。

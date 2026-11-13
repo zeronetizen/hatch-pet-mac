@@ -4,7 +4,7 @@ import AppKit
 /// → 气泡 → 设置窗口 → 系统事件。
 /// 持久化（UserDefaults）：窗口位置（原点）、尺寸、触摸穿透开关、通道配置
 /// （服务器/通道名/间隔，见 ChannelSettings）；accesskey 存本机钥文件
-/// （~/Library/Application Support/HatchPet/keys/，600，见 KeyFileStore）。
+/// （~/Library/Application Support/MusePet/keys/，600，见 KeyFileStore）。
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: PetPanel!
     private var renderer: PetVideoRenderer!
@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         PetLog.setup()
-        PetLog.d("HatchPet 启动（\(AppVersion.displayString)） bundle=\(Bundle.main.bundlePath) pid=\(ProcessInfo.processInfo.processIdentifier)")
+        PetLog.d("MusePet 启动（\(AppVersion.displayString)） bundle=\(Bundle.main.bundlePath) pid=\(ProcessInfo.processInfo.processIdentifier)")
         NSApp.setActivationPolicy(.accessory)
 
         // 资源体检：5 个视频逐个定位并记日志，缺失一眼可见
@@ -133,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        PetLog.d("HatchPet 退出 state=\(stateMachine.current.rawValue)")
+        PetLog.d("MusePet 退出 state=\(stateMachine.current.rawValue)")
         savePosition()
     }
 

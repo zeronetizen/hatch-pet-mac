@@ -2,16 +2,17 @@ import Foundation
 
 /// 按状态自定义形象（v0.11）：用户可在设置里为每个状态选一个自己的视频文件
 /// （mp4/mov）替换内置动画。文件拷贝进本机应用数据目录
-/// ~/Library/Application Support/HatchPet/assets/<state>.<ext>，
+/// ~/Library/Application Support/MusePet/assets/<state>.<ext>，
 /// 映射（state → 文件名）记 UserDefaults（键 assets.customFileNames）。
 /// 播放器解析顺序：自定义文件存在 → 用它，否则内置 mp4（见 ResourceLocator）。
 /// 自定义素材与内置素材走同一条 Metal 亮度抠像管线，白底素材效果最好。
 /// 所有替换/恢复都记日志（状态 + 文件名，非敏感）。
 enum CustomAssets {
-    /// 自定义素材目录：~/Library/Application Support/HatchPet/assets
+    /// 自定义素材目录：~/Library/Application Support/MusePet/assets
+    /// （v0.25 起目录名由 HatchPet 改为 MusePet；测试阶段不迁移旧目录。）
     static var assetsDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("HatchPet/assets", isDirectory: true)
+        return base.appendingPathComponent("MusePet/assets", isDirectory: true)
     }
 
     private static let defaultsKey = "assets.customFileNames"

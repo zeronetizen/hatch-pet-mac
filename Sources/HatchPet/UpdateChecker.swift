@@ -5,7 +5,7 @@ import Foundation
 /// zeronetizen/hatch-pet-mac 的 Releases 检查新版并自助替换。
 /// 发版规范（自 v0.11 起，见 .github/workflows/build.yml）：正式 Release 的
 /// tag 为 v<语义版本>（如 v0.13）、标题含版本号、资产固定为
-/// HatchPet-mac.zip；debug-* 是构建日志 Release，解析时一律跳过。
+/// MusePet-mac.zip；debug-* 是构建日志 Release，解析时一律跳过。
 /// 数据源（v0.13）：主用仓库网页端点 releases.atom，失败兜底 releases/latest
 /// 的 302 跳转取 tag。GitHub 的 API 子域未认证限流 60 次/小时按出口 IP 算，
 /// 用户经共享代理出口时额度常被他人用满（v0.11/v0.12 真机检查必报 403），
@@ -36,7 +36,7 @@ enum UpdateChecker {
     private static let releasesAtom = "https://github.com/zeronetizen/hatch-pet-mac/releases.atom"
     private static let releasesLatest = "https://github.com/zeronetizen/hatch-pet-mac/releases/latest"
     private static let releasesPage = "https://github.com/zeronetizen/hatch-pet-mac/releases"
-    private static let assetName = "HatchPet-mac.zip"
+    private static let assetName = "MusePet-mac.zip"
     private static let lastAutoCheckKey = "update.lastAutoCheckAt"
 
     // MARK: - 版本工具
@@ -169,7 +169,7 @@ enum UpdateChecker {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.setValue("application/atom+xml", forHTTPHeaderField: "Accept")
-        request.setValue("HatchPet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
+        request.setValue("MusePet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
         let session = RelaySession.makeSession(proxy: proxy)
         PetLog.d("更新检查 GET releases.atom proxy=\(proxy.summary)")
         session.dataTask(with: request) { data, response, error in
@@ -200,7 +200,7 @@ enum UpdateChecker {
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
-        request.setValue("HatchPet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
+        request.setValue("MusePet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
         let stopper = RedirectStopper()
         let session = URLSession(configuration: RelaySession.makeConfiguration(proxy: proxy),
                                  delegate: stopper, delegateQueue: nil)
@@ -301,7 +301,7 @@ enum UpdateChecker {
         let session = RelaySession.makeSession(proxy: proxy)
         var request = URLRequest(url: info.zipURL)
         request.timeoutInterval = 120
-        request.setValue("HatchPet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
+        request.setValue("MusePet/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
         PetLog.d("更新下载开始 url=\(info.zipURL.absoluteString) proxy=\(proxy.summary)")
         session.dataTask(with: request) { data, response, error in
             session.finishTasksAndInvalidate()
@@ -324,7 +324,7 @@ enum UpdateChecker {
     private static func installFromZip(data: Data, info: ReleaseInfo) {
         let fm = FileManager.default
         let work = fm.temporaryDirectory
-            .appendingPathComponent("hatchpet-update-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("musepet-update-\(UUID().uuidString)", isDirectory: true)
         do {
             try fm.createDirectory(at: work, withIntermediateDirectories: true)
             let zipPath = work.appendingPathComponent(assetName)
@@ -335,9 +335,9 @@ enum UpdateChecker {
                 fail("解压下载包失败（ditto 退出码非 0）")
                 return
             }
-            let newApp = extractDir.appendingPathComponent("HatchPet.app")
+            let newApp = extractDir.appendingPathComponent("MusePet.app")
             guard fm.fileExists(atPath: newApp.path) else {
-                fail("下载包结构不对：解压后未找到 HatchPet.app")
+                fail("下载包结构不对：解压后未找到 MusePet.app")
                 return
             }
             // 校验新包版本确实比当前新（读新包自己的 Info.plist，不信 tag）
@@ -375,13 +375,13 @@ enum UpdateChecker {
     }
 
     /// 一次性替换助手：等主进程退出 → ditto 覆盖当前 .app → 去隔离属性 → 重开新版。
-    /// 日志写 ~/Library/Logs/HatchPet-update-helper.log（独立于主日志，便于事后核对）。
+    /// 日志写 ~/Library/Logs/MusePet-update-helper.log（独立于主日志，便于事后核对）。
     private static func helperScript(workDir: String) -> String {
         """
         #!/bin/bash
-        # HatchPet 自助更新助手（由 HatchPet v\(currentVersionString) 生成，勿手改）
+        # MusePet 自助更新助手（由 MusePet v\(currentVersionString) 生成，勿手改）
         PID="$1"; NEW_APP="$2"; TARGET="$3"; WORK="$4"
-        LOG="$HOME/Library/Logs/HatchPet-update-helper.log"
+        LOG="$HOME/Library/Logs/MusePet-update-helper.log"
         exec >> "$LOG" 2>&1
         echo "=== $(date '+%Y-%m-%d %H:%M:%S') helper start pid=$PID new=$NEW_APP target=$TARGET"
         for i in $(seq 1 100); do
@@ -393,7 +393,7 @@ enum UpdateChecker {
           exit 1
         fi
         sleep 0.5
-        STAGED="$(dirname "$TARGET")/.HatchPet-staged-$$"
+        STAGED="$(dirname "$TARGET")/.MusePet-staged-$$"
         if ! ditto "$NEW_APP" "$STAGED"; then
           echo "ditto 暂存新包失败，旧版保持不变"
           rm -rf "$STAGED"
@@ -401,7 +401,7 @@ enum UpdateChecker {
         fi
         rm -rf "$TARGET"
         if ! mv "$STAGED" "$TARGET"; then
-          echo "新包就位失败——暂存副本在 $STAGED，请手动改名为 HatchPet.app"
+          echo "新包就位失败——暂存副本在 $STAGED，请手动改名为 MusePet.app"
           exit 1
         fi
         xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true

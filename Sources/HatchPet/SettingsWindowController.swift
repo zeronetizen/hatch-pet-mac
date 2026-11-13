@@ -2,9 +2,11 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
+/// v0.25：删各节独立说明文字（代理/形象/更新三处说明行、状态行初始说明），
+/// 反馈文案缩短为一句事实；关于节按钮改「官网」。
 /// v0.23：删「导出 skill」整节（引导页免费通道与自建面板已有各自导出入口，此处
 /// 是重复入口；SkillExport 本体不动）与「说明」整节；新增「关于」节（一行版本 +
-/// 官网/落地页链接按钮）。
+/// 官网链接按钮）。
 /// v0.21：连接区再简化——删掉只读展示块，只剩一行「通道：[粘贴框] 连接」+ 状态行；
 /// 连接凭证的用户面名称统一叫「通道码」（即 hatchpet1: 串，旧称配对串；wire 格式与
 /// PairingString 解析不变）。
@@ -60,9 +62,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         // 窗口高度按光标驱动布局的总 decrement 定：内容排满后底部留约 60 给
         // 关闭按钮区；超过屏幕可视高时按屏幕收。
         let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
-        // v0.23：删导出 skill（-102）与说明（-70）两节、关于/更新拆为检查更新
-        // （+104）与关于（+68），窗高从 876 收到 782
-        let W: CGFloat = 540, H: CGFloat = min(782, visibleH - 16)
+        // v0.25：再删代理说明行（-36）与形象说明行（-36），窗高从 782 收到 710
+        // （其余 decrement 与 v0.23 相同，总 630，内容底边停在 60）
+        let W: CGFloat = 540, H: CGFloat = min(710, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -126,7 +128,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(intervalPopup)
         cursor -= 40
 
-        // 代理小节：开关 + 类型/主机/端口 + 说明（直连 TLS 失败时经本机代理出海）
+        // 代理小节：开关 + 类型/主机/端口（直连 TLS 失败时经本机代理出海）
         _ = addLabel("代理", top: cursor)
         proxyCheckbox = NSButton(checkboxWithTitle: "使用代理连接服务器", target: self, action: #selector(proxyToggled))
         proxyCheckbox.frame = NSRect(x: fieldX, y: cursor - 24, width: 240, height: 24)
@@ -146,21 +148,13 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         proxyPortField.delegate = self
         content.addSubview(proxyPortField)
         cursor -= 32
-        let proxyHint = NSTextField(labelWithString: "直连服务器失败（如 TLS 错误）时，可填本机代理客户端的监听地址，例如 mihomo/Clash 的 127.0.0.1:7890（混合端口选 HTTP 即可）。")
-        proxyHint.font = .systemFont(ofSize: 11)
-        proxyHint.textColor = .secondaryLabelColor
-        proxyHint.lineBreakMode = .byWordWrapping
-        proxyHint.maximumNumberOfLines = 2
-        proxyHint.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
-        content.addSubview(proxyHint)
-        cursor -= 36
 
-        // 测试连接 + 状态行
+        // 测试连接 + 状态行（状态行初始置空，只显示操作反馈）
         let testBtn = NSButton(title: "测试连接", target: self, action: #selector(testConnection))
         testBtn.bezelStyle = .rounded
         testBtn.frame = NSRect(x: fieldX, y: cursor - 28, width: 110, height: 28)
         content.addSubview(testBtn)
-        statusLabel = NSTextField(labelWithString: "换连接请粘贴通道码；其余改动即时生效。")
+        statusLabel = NSTextField(labelWithString: "")
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.maximumNumberOfLines = 3
@@ -203,16 +197,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
             assetRows[state] = (source: source, reset: resetBtn)
             cursor -= 32
         }
-        let assetsHint = NSTextField(labelWithString: "为状态选自己的视频（mp4/mov）替换内置动画，立即生效。建议正方形、白底、480×480——素材走同一套抠像，白底效果最好。")
-        assetsHint.font = .systemFont(ofSize: 11)
-        assetsHint.textColor = .secondaryLabelColor
-        assetsHint.lineBreakMode = .byWordWrapping
-        assetsHint.maximumNumberOfLines = 2
-        assetsHint.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
-        content.addSubview(assetsHint)
-        cursor -= 36
 
-        // 检查更新小节：检查更新按钮 + 更新状态行（版本行 v0.23 起移到「关于」节）
+        // 检查更新小节：检查更新按钮 + 更新状态行（初始置空，只显示检查反馈；
+        // 版本行 v0.23 起移到「关于」节）
         let sep4 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
         sep4.boxType = .separator
         content.addSubview(sep4)
@@ -227,7 +214,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         checkBtn.frame = NSRect(x: fieldX, y: cursor - 27, width: 110, height: 26)
         content.addSubview(checkBtn)
         cursor -= 32
-        updateStatusLabel = NSTextField(labelWithString: "更新源：GitHub 仓 zeronetizen/hatch-pet-mac 的 Releases（经本页代理）；启动时每天自动静默检查一次。")
+        updateStatusLabel = NSTextField(labelWithString: "")
         updateStatusLabel.font = .systemFont(ofSize: 11)
         updateStatusLabel.textColor = .secondaryLabelColor
         updateStatusLabel.lineBreakMode = .byWordWrapping
@@ -236,7 +223,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(updateStatusLabel)
         cursor -= 36
 
-        // 关于小节（v0.23）：只放一行版本 + 官网/落地页链接按钮，说明文字已全删
+        // 关于小节（v0.23）：只放一行版本 + 官网链接按钮，说明文字已全删
         let sep5 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
         sep5.boxType = .separator
         content.addSubview(sep5)
@@ -250,7 +237,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         aboutVer.font = .systemFont(ofSize: 12)
         aboutVer.frame = NSRect(x: fieldX, y: cursor - 22, width: 220, height: 20)
         content.addSubview(aboutVer)
-        let landingBtn = NSButton(title: "官网/落地页", target: self, action: #selector(openLandingPage))
+        let landingBtn = NSButton(title: "官网", target: self, action: #selector(openLandingPage))
         landingBtn.bezelStyle = .rounded
         landingBtn.frame = NSRect(x: fieldX + fieldW - 120, y: cursor - 27, width: 120, height: 26)
         content.addSubview(landingBtn)
@@ -289,7 +276,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         proxyHostField.stringValue = cfg.proxy.host
         proxyPortField.stringValue = "\(cfg.proxy.port)"
         updateProxyControls()
-        statusLabel.stringValue = "换连接请粘贴通道码；其余改动即时生效。"
+        statusLabel.stringValue = ""
         refreshAssetRows()
         appliedSnapshot = snapshotFromFields()
         let keyPresent = !(ChannelSettings.accessKey(for: cfg.channel) ?? "").isEmpty
@@ -447,7 +434,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         let state = PetState.allCases[sender.tag]
         let panel = NSOpenPanel()
         panel.title = "为「\(state.label)」选择形象视频"
-        panel.message = "建议正方形、白底视频（480×480 最佳）：素材会经与内置动画相同的抠像显示。"
         panel.allowedContentTypes = [UTType.movie, UTType.video]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -482,7 +468,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     // MARK: - 检查更新 / 关于
 
     @objc private func checkUpdates() {
-        updateStatusLabel.stringValue = "检查中…（经当前代理设置访问 GitHub）"
+        updateStatusLabel.stringValue = "检查中…"
         UpdateChecker.checkManually { [weak self] text in
             self?.updateStatusLabel.stringValue = text
         }
@@ -560,7 +546,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     }
 
     @objc private func openLandingPage() {
-        PetLog.d("[about] 打开官网/落地页 https://pet.8529527.xyz/")
+        PetLog.d("[about] 打开官网 https://pet.8529527.xyz/")
         NSWorkspace.shared.open(URL(string: "https://pet.8529527.xyz/")!)
     }
 
@@ -569,7 +555,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 连接。校验失败只提示、不动现有配置；成功后清空输入框（码含钥，不留明文）。
     @objc private func connectFromPairing() {
         guard let parsed = PairingString.parse(pairingField.stringValue) else {
-            statusLabel.stringValue = "通道码不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
+            statusLabel.stringValue = "通道码不对（应以 hatchpet1: 开头）。"
             return
         }
         let cur = ChannelSettings.load()
@@ -598,7 +584,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         let str = PairingString.encode(server: currentServerBase(), channel: channel, key: key)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(str, forType: .string)
-        statusLabel.stringValue = "通道码已复制：整串发给你的智能体，它就能往这条通道写状态。通道码含钥，只发给信任的对象。"
+        statusLabel.stringValue = "通道码已复制。"
         PetLog.d("[pairing] 通道码已复制 channel=\(channel)（钥不记日志）")
     }
 

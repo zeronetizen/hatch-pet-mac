@@ -31,15 +31,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: debug-${{ github.run_number }}
-          name: HatchPet build log ${{ github.run_number }}
+          name: MusePet build log ${{ github.run_number }}
           files: build-output.log
           fail_on_unmatched_files: false
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HatchPet-mac
-          path: HatchPet-mac.zip
+          name: MusePet-mac
+          path: MusePet-mac.zip
 
       # 发版规范（v0.11 起）：正式 Release 的 tag 用语义版本 v<CFBundleShortVersionString>、
       # 标题含版本号——App 内自助更新（UpdateChecker）按 tag 解析版本比较新旧；
@@ -55,9 +55,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
-          name: HatchPet v${{ steps.version.outputs.version }}
+          name: MusePet v${{ steps.version.outputs.version }}
           # 正文取 Packaging/release-notes.md（每版发版前更新，保证 Release 正文
           # 写清本版变更摘要；App 更新弹窗会摘录这段正文展示给用户）
           body_path: Packaging/release-notes.md
-          files: HatchPet-mac.zip
+          files: MusePet-mac.zip
           fail_on_unmatched_files: true

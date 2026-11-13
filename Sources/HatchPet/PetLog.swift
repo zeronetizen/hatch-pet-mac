@@ -1,10 +1,10 @@
 import Foundation
 
-/// 全量调试日志：写 ~/Library/Logs/HatchPet.log（带时间戳、环形保留约 2000 行）+ NSLog。
+/// 全量调试日志：写 ~/Library/Logs/MusePet.log（带时间戳、环形保留约 2000 行）+ NSLog。
 /// 关键路径必须打日志：启动、资源定位结果、Metal 初始化/着色器编译、状态切换
 /// （来源/目标/被拒原因）、一次性状态回落、窗口位置保存、睡醒/解锁事件、播放器错误。
 enum PetLog {
-    private static let queue = DispatchQueue(label: "com.nonzero.hatchpet.mac.log")
+    private static let queue = DispatchQueue(label: "com.nonzero.musepet.mac.log")
     private static let maxLines = 2000
     private static var lines: [String] = []
     private static var handle: FileHandle?
@@ -12,7 +12,7 @@ enum PetLog {
     private static let logURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs", isDirectory: true)
-        return dir.appendingPathComponent("HatchPet.log")
+        return dir.appendingPathComponent("MusePet.log")
     }()
 
     private static let fmt: DateFormatter = {
@@ -47,7 +47,7 @@ enum PetLog {
 
     static func d(_ msg: String) {
         let line = "\(fmt.string(from: Date()))  \(msg)"
-        NSLog("[HatchPet] %@", msg)
+        NSLog("[MusePet] %@", msg)
         queue.async {
             lines.append(line)
             if let data = (line + "\n").data(using: .utf8) {

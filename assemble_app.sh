@@ -1,19 +1,21 @@
 #!/bin/bash
-# HatchPet macOS 打包脚本：在 macOS 上运行（本机 Linux 只能做 bash -n 语法检查）。
-# 流程：swift build universal 二进制 → 组装 HatchPet.app → ad-hoc 签名 → 打 zip。
+# MusePet macOS 打包脚本：在 macOS 上运行（本机 Linux 只能做 bash -n 语法检查）。
+# 流程：swift build universal 二进制 → 组装 MusePet.app → ad-hoc 签名 → 打 zip。
+# v0.25 起产物改名 MusePet；SwiftPM 目标名保持 HatchPet，二进制组装时改名落位。
 set -euxo pipefail
 
 cd "$(dirname "$0")"
 
-APP_NAME="HatchPet"
+APP_NAME="MusePet"
+BIN_NAME="HatchPet"
 APP="${APP_NAME}.app"
-ZIP_NAME="HatchPet-mac.zip"
+ZIP_NAME="MusePet-mac.zip"
 VIDEOS="hatch.mp4 hatch_working.mp4 hatch_making_something.mp4 hatch_waking.mp4 hatch_milestone_level_up.mp4"
 
 # 1) universal 二进制（arm64 + x86_64）
 swift build -c release --arch arm64 --arch x86_64
 BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
-BIN="${BIN_DIR}/${APP_NAME}"
+BIN="${BIN_DIR}/${BIN_NAME}"
 test -x "${BIN}"
 
 # 2) 组装 .app 结构
