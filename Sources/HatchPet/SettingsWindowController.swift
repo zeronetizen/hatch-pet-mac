@@ -2,6 +2,8 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
+/// v0.26：通道码框挂 delegate 做粘贴清洗（内容变化即去掉全部空白、多行剪贴板
+/// 自动拼成一整串、状态行报字数确认；根因与主菜单修复见 main.swift）。
 /// v0.25：删各节独立说明文字（代理/形象/更新三处说明行、状态行初始说明），
 /// 反馈文案缩短为一句事实；关于节按钮改「官网」。
 /// v0.23：删「导出 skill」整节（引导页免费通道与自建面板已有各自导出入口，此处
@@ -31,6 +33,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 最近一次测连接结果（nil = 本次打开设置后未测）：状态行尾巴用，刷新见 refreshConnectionStatus
     private var lastTestOK: Bool?
     private var pairingField: NSTextField!
+    /// 通道码框上次内容长度：判「整串刚粘进来」以便只在整串到达时报字数确认（v0.26）
+    private var pairingPrevLen = 0
     private var copyPairingButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
@@ -92,6 +96,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         _ = addLabel("通道", top: cursor)
         pairingField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 88, height: 24))
         pairingField.placeholderString = "粘贴通道码"
+        pairingField.delegate = self // v0.26：粘贴清洗（见 controlTextDidChange）
         content.addSubview(pairingField)
         let pairConnectBtn = NSButton(title: "连接", target: self, action: #selector(connectFromPairing))
         pairConnectBtn.bezelStyle = .rounded
@@ -337,6 +342,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 换连接走通道码，见 connectFromPairing）。
     func controlTextDidEndEditing(_ obj: Notification) {
         guard !isLoading, let field = obj.object as? NSTextField else { return }
+        // 通道码框（v0.26 起挂了 delegate）不走即时应用：换连接只认点「连接」。
+        if field === pairingField { return }
         switch field {
         case proxyHostField, proxyPortField:
             applyFromFields(feedback: "已生效：代理 \(proxyFromFields().summary)")
@@ -538,6 +545,41 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         }.resume()
     }
 
+    // MARK: - 通道码框粘贴清洗（v0.26）
+
+    /// 内容变化即清洗：去掉全部空白（换行、回车、空格）——剪贴板里的串被聊天
+    /// 客户端折成多行时，粘进来立刻拼成一整串单行，不再被单行字段编辑器在
+    /// 首个换行处截断。清洗确实改写了内容时把 caret 拉到串尾并滚动到可见；
+    /// 整串到达（清洗发生、或长度跃升到整串量级）时在状态行报字数，让用户
+    /// 确认已输入。只对通道码框生效，代理字段不走这里。
+    func controlTextDidChange(_ obj: Notification) {
+        guard !isLoading, let field = obj.object as? NSTextField, field === pairingField else { return }
+        let raw = field.stringValue
+        let cleaned = raw.components(separatedBy: .whitespacesAndNewlines).joined()
+        let sanitized = cleaned != raw
+        if sanitized {
+            field.stringValue = cleaned
+            moveCaretToEnd(field)
+            PetLog.d("[pairing] 通道码输入清洗：去掉空白 \(raw.count - cleaned.count) 字、拼成一整串 len=\(cleaned.count)（串本体不记日志）")
+        }
+        let prev = pairingPrevLen
+        pairingPrevLen = cleaned.count
+        if sanitized {
+            statusLabel.stringValue = "通道码已自动拼成一整串（共 \(cleaned.count) 字），点「连接」应用。"
+        } else if cleaned.count >= 40, prev < 40 || cleaned.count - prev >= 10 {
+            statusLabel.stringValue = "通道码已输入（共 \(cleaned.count) 字），点「连接」应用。"
+        }
+    }
+
+    /// 把字段编辑器的 caret 移到串尾并滚动到可见（清洗改写后用；未经清洗的
+    /// 正常粘贴 caret 本就落在插入末尾、编辑器会自动滚动，无需干预）。
+    private func moveCaretToEnd(_ field: NSTextField) {
+        guard let editor = field.currentEditor() else { return }
+        let len = (field.stringValue as NSString).length
+        editor.selectedRange = NSRange(location: len, length: 0)
+        if len > 0 { editor.scrollRangeToVisible(NSRange(location: len - 1, length: 1)) }
+    }
+
     // MARK: - 通道码（v0.18 引入 hatchpet1: 串；v0.21 起用户面统一称「通道码」，唯一的连接配置入口）
 
     @objc private func reopenOnboarding() {
@@ -564,6 +606,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         ChannelSettings.save(cfg)
         KeyFileStore.save(key: parsed.key, channel: parsed.channel)
         pairingField.stringValue = ""
+        pairingPrevLen = 0
         lastTestOK = nil
         refreshConnectionStatus()
         appliedSnapshot = snapshotFromFields()

@@ -11,6 +11,10 @@ import AppKit
 /// 的服务器，已配置自建/私有中转的用户重走引导必 404）；/redeem 同理固定公共
 /// 中转。② 版式收紧：品牌区 + 分组卡片（浅色圆角），窗口高度按可见分组动态
 /// 计算（隐藏分组不占位），删底部「关闭」按钮（标题栏关闭钮已足够）。
+/// v0.26：通道码/领取串粘贴体验——根因是应用无主菜单、Cmd+V 无人派发（修在
+/// main.swift）；且多行剪贴板会被单行字段编辑器在首个换行处截断。这两个框
+/// 挂上 delegate，内容变化即清洗全部空白拼成一整串、caret 拉到串尾、并在
+/// feedback 行报字数确认已输入。
 /// v0.24：① 修品牌标题被窗口顶边裁切——relayout 旧实现把 win.frame 高（含
 /// 标题栏约 28pt）直接当 content 高用，内容整体上移一个标题栏、标题上半截被
 /// 吃掉；改用 frameRect(forContentRect:) 换算，并把顶距放宽到 22pt。② 代理
@@ -50,6 +54,9 @@ final class OnboardingWindowController: NSObject, NSTextFieldDelegate {
     private var actionButtons: [NSButton] = []
     /// /status 失败态时状态行多出一行小字诊断，状态段额外高度（0 = 单行）
     private var statusDetailH: CGFloat = 0
+    /// 粘贴框上次内容长度（按字段区分）：判「整串刚粘进来」以便只在整串到达
+    /// 时报字数确认，不逐字打扰（v0.26）
+    private var pastePrevLen: [ObjectIdentifier: Int] = [:]
 
     // 布局常量（手动 frame；relayout 按可见分组从顶往下排并定窗高）
     private static let W: CGFloat = 560
@@ -183,6 +190,7 @@ final class OnboardingWindowController: NSObject, NSTextFieldDelegate {
         actionButtons.append(botBtn)
         claimStringField = NSTextField(frame: NSRect(x: 172, y: 40, width: innerW - 172 + 14 - 98, height: 24))
         claimStringField.placeholderString = "领取串 hatchpet-code1:…（从 bot 消息整串粘贴）"
+        claimStringField.delegate = self // v0.26：粘贴清洗（见 controlTextDidChange）
         botCard.addSubview(claimStringField)
         let claimRedeemBtn = NSButton(title: "兑换", target: self, action: #selector(redeemFromClaimString))
         claimRedeemBtn.bezelStyle = .rounded
@@ -206,6 +214,7 @@ final class OnboardingWindowController: NSObject, NSTextFieldDelegate {
         pairingCard.addSubview(pairLabel)
         pairingField = NSTextField(frame: NSRect(x: 14, y: 16, width: innerW - 120, height: 24))
         pairingField.placeholderString = "hatchpet1:…（粘贴整串）"
+        pairingField.delegate = self // v0.26：粘贴清洗（见 controlTextDidChange）
         pairingCard.addSubview(pairingField)
         let connectBtn = NSButton(title: "连接", target: self, action: #selector(connectFromPairing))
         connectBtn.bezelStyle = .rounded
@@ -439,6 +448,47 @@ final class OnboardingWindowController: NSObject, NSTextFieldDelegate {
             .foregroundColor: NSColor.secondaryLabelColor,
         ]))
         return attr
+    }
+
+    // MARK: - 粘贴框清洗（通道码 / 领取串，v0.26）
+
+    /// 内容变化即清洗：去掉全部空白（换行、回车、空格）——剪贴板里的串被聊天
+    /// 客户端折成多行时，粘进来立刻拼成一整串单行，不再被单行字段编辑器在
+    /// 首个换行处截断（parse 只 trim 首尾、内部空白对 base64 是致命的）。
+    /// 清洗确实改写了内容时把 caret 拉到串尾并滚动到可见；整串到达（清洗发生、
+    /// 或长度跃升到整串量级）时在 feedback 行报字数，让用户确认已输入。
+    /// 只对这两个粘贴框生效，代理/邮箱等字段不走这里。
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let noun: String, action: String
+        if field === pairingField { noun = "通道码"; action = "连接" }
+        else if field === claimStringField { noun = "领取串"; action = "兑换" }
+        else { return }
+        let raw = field.stringValue
+        let cleaned = raw.components(separatedBy: .whitespacesAndNewlines).joined()
+        let sanitized = cleaned != raw
+        if sanitized {
+            field.stringValue = cleaned
+            moveCaretToEnd(field)
+            PetLog.d("[onboarding] \(noun)输入清洗：去掉空白 \(raw.count - cleaned.count) 字、拼成一整串 len=\(cleaned.count)（串本体不记日志）")
+        }
+        let key = ObjectIdentifier(field)
+        let prev = pastePrevLen[key] ?? 0
+        pastePrevLen[key] = cleaned.count
+        if sanitized {
+            feedback.stringValue = "\(noun)已自动拼成一整串（共 \(cleaned.count) 字），点「\(action)」即可。"
+        } else if cleaned.count >= 40, prev < 40 || cleaned.count - prev >= 10 {
+            feedback.stringValue = "\(noun)已输入（共 \(cleaned.count) 字），点「\(action)」即可。"
+        }
+    }
+
+    /// 把字段编辑器的 caret 移到串尾并滚动到可见（清洗改写后用；未经清洗的
+    /// 正常粘贴 caret 本就落在插入末尾、编辑器会自动滚动，无需干预）。
+    private func moveCaretToEnd(_ field: NSTextField) {
+        guard let editor = field.currentEditor() else { return }
+        let len = (field.stringValue as NSString).length
+        editor.selectedRange = NSRange(location: len, length: 0)
+        if len > 0 { editor.scrollRangeToVisible(NSRange(location: len - 1, length: 1)) }
     }
 
     // MARK: - 代理行（引导页内嵌，与 ChannelSettings 同一份存储）
