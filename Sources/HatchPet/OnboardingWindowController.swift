@@ -3,7 +3,7 @@ import AppKit
 /// 首启引导窗（v0.18）：未配置通道+钥时由 AppDelegate 弹出，设置里也可经
 /// 「重新走引导」再开。打开即 GET /status 分流：
 /// - open → 领取面板（导出领取 skill 包 + 配对串粘贴连接）
-/// - full → bot 面板（跳 @hatchPetBot + 兑换码/Telegram ID 兑换）
+/// - full → bot 面板（跳 @hatchPetBot + 领取串单输入兑换）
 /// - 查失败 → 提示重试，配对串粘贴与自建面板仍可用，不堵死
 /// 两态常显自建面板（邮箱 → 生成带 pet-owner.json 的自建 skill 包）。
 /// 连接成功 = 落盘配置 + 存钥 + 回调 AppDelegate 重启轮询，随后关窗。
@@ -16,8 +16,7 @@ final class OnboardingWindowController: NSObject {
     private var claimGroup: NSView!
     private var claimText: NSTextField!
     private var botGroup: NSView!
-    private var codeField: NSTextField!
-    private var tgField: NSTextField!
+    private var claimStringField: NSTextField!
     private var pairingField: NSTextField!
     private var emailField: NSTextField!
     private var feedback: NSTextField!
@@ -96,8 +95,8 @@ final class OnboardingWindowController: NSObject {
         claimHint.maximumNumberOfLines = 3
         claimHint.frame = NSRect(x: 0, y: 6, width: FW, height: 44)
         claimGroup.addSubview(claimHint)
-        // bot 组
-        let botText = NSTextField(labelWithString: "免费名额已领完。去宠物 bot 做几个小任务，就能领一个兑换码：")
+        // bot 组：兑换区只有领取串单输入（v0.19 定版，不再手填兑换码/数字 ID）
+        let botText = NSTextField(labelWithString: "免费名额已领完。去宠物 bot 做几个小任务，会领到一串「领取串」，整串粘到下面兑换：")
         botText.font = .systemFont(ofSize: 13, weight: .medium)
         botText.lineBreakMode = .byWordWrapping
         botText.maximumNumberOfLines = 2
@@ -105,24 +104,21 @@ final class OnboardingWindowController: NSObject {
         botGroup.addSubview(botText)
         let botBtn = NSButton(title: "去 Telegram 领取", target: self, action: #selector(openBot))
         botBtn.bezelStyle = .rounded
-        botBtn.frame = NSRect(x: 0, y: 70, width: 160, height: 28)
+        botBtn.frame = NSRect(x: 0, y: 68, width: 160, height: 28)
         botGroup.addSubview(botBtn)
         actionButtons.append(botBtn)
-        codeField = NSTextField(frame: NSRect(x: 0, y: 34, width: 168, height: 24))
-        codeField.placeholderString = "兑换码（12 位）"
-        botGroup.addSubview(codeField)
-        tgField = NSTextField(frame: NSRect(x: 178, y: 34, width: 168, height: 24))
-        tgField.placeholderString = "Telegram 数字 ID"
-        botGroup.addSubview(tgField)
-        let redeemBtn = NSButton(title: "兑换", target: self, action: #selector(redeem))
-        redeemBtn.bezelStyle = .rounded
-        redeemBtn.frame = NSRect(x: 356, y: 32, width: 90, height: 28)
-        botGroup.addSubview(redeemBtn)
-        actionButtons.append(redeemBtn)
-        let botHint = NSTextField(labelWithString: "数字 ID 在 bot 发码的消息里有注明，照抄填入；兑换成功会自动连接。")
+        claimStringField = NSTextField(frame: NSRect(x: 0, y: 30, width: FW - 100, height: 24))
+        claimStringField.placeholderString = "领取串 hatchpet-code1:…（从 bot 消息整串粘贴）"
+        botGroup.addSubview(claimStringField)
+        let claimRedeemBtn = NSButton(title: "兑换", target: self, action: #selector(redeemFromClaimString))
+        claimRedeemBtn.bezelStyle = .rounded
+        claimRedeemBtn.frame = NSRect(x: FW - 90, y: 28, width: 90, height: 28)
+        botGroup.addSubview(claimRedeemBtn)
+        actionButtons.append(claimRedeemBtn)
+        let botHint = NSTextField(labelWithString: "领取串在 bot 发码的消息里，整串复制粘贴即可，不用再手填兑换码和数字 ID；兑换成功会自动连接。")
         botHint.font = .systemFont(ofSize: 11)
         botHint.textColor = .secondaryLabelColor
-        botHint.frame = NSRect(x: 0, y: 8, width: FW, height: 16)
+        botHint.frame = NSRect(x: 0, y: 6, width: FW, height: 16)
         botGroup.addSubview(botHint)
         claimGroup.isHidden = true
         botGroup.isHidden = true
@@ -272,25 +268,29 @@ final class OnboardingWindowController: NSObject {
 
     // MARK: - 兑换
 
-    @objc private func redeem() {
-        let code = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tgId = tgField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !code.isEmpty, !tgId.isEmpty, tgId.allSatisfy({ $0.isNumber }) else {
-            feedback.stringValue = "请把兑换码和 Telegram 数字 ID 都填好（ID 是纯数字）。"
-            PetLog.d("[onboarding] 兑换拦截：字段不完整 code空=\(code.isEmpty) tg空=\(tgId.isEmpty)")
+    /// 唯一入口：领取串单输入。解码校验全过才发请求；串不对只提示、不发网络。
+    /// 校验过后 POST /redeem {code, tgId}，201 后沿用连接流程自动落盘。
+    @objc private func redeemFromClaimString() {
+        let raw = claimStringField.stringValue
+        guard let parsed = ClaimString.parse(raw) else {
+            feedback.stringValue = "这串不完整或不是领取串：应是 hatchpet-code1: 开头的一整串，从 bot 消息里整串复制、不要改动。"
             return
         }
+        performRedeem(code: parsed.code, tgIdJSON: parsed.tgId)
+    }
+
+    private func performRedeem(code: String, tgIdJSON: Any) {
         let cfg = ChannelSettings.load()
         let base = cfg.baseURL
         guard let url = URL(string: "\(base)/redeem") else { return }
-        PetLog.d("[onboarding] POST \(base)/redeem codeLen=\(code.count)（码与 ID 不记日志）")
+        PetLog.d("[redeem] POST \(base)/redeem codeLen=\(code.count)（码与 ID 不记日志）")
         setActionsEnabled(false)
         feedback.stringValue = "兑换中…"
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = ["code": code, "tgId": tgId]
+        let body: [String: Any] = ["code": code, "tgId": tgIdJSON]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         let session = RelaySession.makeSession(proxy: cfg.proxy)
         session.dataTask(with: request) { [weak self] data, response, error in
@@ -301,20 +301,20 @@ final class OnboardingWindowController: NSObject {
                 let http = (response as? HTTPURLResponse)?.statusCode ?? -1
                 if let error {
                     self.feedback.stringValue = "兑换失败：\(error.localizedDescription)"
-                    PetLog.d("[onboarding] 兑换网络错误：\(error.localizedDescription)")
+                    PetLog.d("[redeem] 兑换网络错误：\(error.localizedDescription)")
                     return
                 }
                 let obj = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
                 if http == 201, let channel = obj?["channel"] as? String,
                    let key = obj?["key"] as? String, !channel.isEmpty, !key.isEmpty {
-                    PetLog.d("[onboarding] 兑换成功 channel=\(channel) keyLen=\(key.count)，自动走连接流程")
+                    PetLog.d("[redeem] 兑换成功 channel=\(channel) keyLen=\(key.count)，自动走连接流程")
                     self.applyConnection(server: base, channel: channel, key: key, source: "redeem")
                     return
                 }
                 let errCode = obj?["error"] as? String ?? ""
                 self.feedback.stringValue = Self.redeemErrorText(errCode, http: http,
                                                                  channel: obj?["channel"] as? String)
-                PetLog.d("[onboarding] 兑换失败 http=\(http) error=\(errCode)")
+                PetLog.d("[redeem] 兑换失败 http=\(http) error=\(errCode)")
             }
         }.resume()
     }
@@ -325,11 +325,11 @@ final class OnboardingWindowController: NSObject {
         case "code_not_found": return "兑换失败：这个码不存在或已经被用掉了，回 bot 核对或重新领一个。"
         case "code_expired": return "兑换失败：兑换码已过期（有效期 24 小时），回 bot 重新领一个新码。"
         case "code_revoked": return "兑换失败：这个码已被作废，回 bot 重新领一个。"
-        case "tg_mismatch": return "兑换失败：这个码不是发给这个 Telegram ID 的——ID 照 bot 发码消息里注明的那个填。"
+        case "tg_mismatch": return "兑换失败：这串领取串不是发给你的账号的（码与账号不匹配），回 bot 用你自己的账号重新领一串。"
         case "already_claimed": return "这个 Telegram 账号已经领过通道了（一号一领）\(channel.map { "：\($0)" } ?? "")。请用当初的配对串连接，或在设置里手填那条通道。"
         case "rate_limited": return "兑换失败：太频繁了，过一会儿再试。"
         case "busy": return "兑换失败：服务器繁忙，过一会儿再试。"
-        case "bad_request", "bad_json": return "兑换失败：兑换码或 ID 格式不对，核对后重试。"
+        case "bad_request", "bad_json": return "兑换失败：领取串内容格式不对，整串重新复制后重试。"
         case "too_large": return "兑换失败：请求异常（too_large），请重试。"
         default: return "兑换失败：服务器返回 HTTP \(http)\(code.isEmpty ? "" : "（\(code)）")。"
         }

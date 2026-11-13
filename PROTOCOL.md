@@ -228,5 +228,53 @@ entry of the three fields — server, channel, key — remains available in
 client settings as a fallback, but the pairing string is the canonical
 interchange format. The v1 three-line text block is superseded.)
 
+## Claim string
+
+When the free quota is exhausted, users earn a redemption code through the
+pet bot (task wall). The bot hands the code over as a single **claim
+string**, so the user pastes one string into the app instead of copying a
+code and a numeric ID separately:
+
+```
+hatchpet-code1:<base64url>
+```
+
+The part after the `hatchpet-code1:` prefix is the base64url encoding
+(RFC 4648 §5, padding optional) of a UTF-8 JSON object:
+
+```json
+{ "v": 1, "code": "AB3K7M9PQX2Z", "tg": 123456789 }
+```
+
+Fields:
+
+- `v` — format version, the number `1`.
+- `code` — the 12-character redemption code issued by the server
+  (see `/redeem` above).
+- `tg` — the Telegram numeric user ID the code was issued to, as a
+  positive integer. The server binds each code to one Telegram account;
+  this value is what the client sends as `tgId` when redeeming.
+
+Decoding and validation rules for clients:
+
+1. Trim surrounding whitespace. The string must start with the literal,
+   case-sensitive prefix `hatchpet-code1:` — reject it otherwise.
+2. Base64url-decode the remainder and parse it as JSON. If decoding or
+   parsing fails, reject the whole string and do not send any request.
+3. The JSON must be an object with `v` equal to the number `1`, `code` a
+   non-empty string, and `tg` a positive integer. Unknown extra fields
+   are ignored (forward compatibility within v1).
+4. On success, call `POST /redeem` with `{ "code": <code>, "tgId": <tg> }`
+   and continue with the returned channel/key exactly like a pairing
+   (the app assembles the pairing internally and connects).
+
+Claim string vs. pairing string: a claim string is a **pre-redemption**
+voucher — it carries no channel and no key, it is worthless once redeemed
+(the code is consumed on success), and it expires with the code (24 h).
+A pairing string is the **post-redemption** channel credential — it
+carries the long-lived channel key and must be stored and guarded like
+one. Never log a claim string in full; clients may log its length and
+the decode outcome only.
+
 Any client that can do HTTPS GET/POST with a bearer header can use the
 protocol directly (curl, a skill, an MCP tool, a few lines of any language).
