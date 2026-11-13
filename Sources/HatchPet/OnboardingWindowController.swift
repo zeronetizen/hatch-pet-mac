@@ -2,9 +2,9 @@ import AppKit
 
 /// 首启引导窗（v0.18）：未配置通道+钥时由 AppDelegate 弹出，设置里也可经
 /// 「重新走引导」再开。打开即 GET /status 分流：
-/// - open → 领取面板（导出领取 skill 包 + 配对串粘贴连接）
+/// - open → 领取面板（导出领取 skill 包 + 通道码粘贴连接）
 /// - full → bot 面板（跳 @hatchPetBot + 领取串单输入兑换）
-/// - 查失败 → 提示重试，配对串粘贴与自建面板仍可用，不堵死
+/// - 查失败 → 提示重试，通道码粘贴与自建面板仍可用，不堵死
 /// 两态常显自建面板（邮箱 → 生成带 pet-owner.json 的自建 skill 包）。
 /// 连接成功 = 落盘配置 + 存钥 + 回调 AppDelegate 重启轮询，随后关窗。
 final class OnboardingWindowController: NSObject {
@@ -88,7 +88,7 @@ final class OnboardingWindowController: NSObject {
         claimBtn.frame = NSRect(x: 0, y: 66, width: 170, height: 28)
         claimGroup.addSubview(claimBtn)
         actionButtons.append(claimBtn)
-        let claimHint = NSTextField(labelWithString: "把导出的包交给你的智能体，它领到通道后会给你一串配对串，粘到下方配对串框点「连接」即可。")
+        let claimHint = NSTextField(labelWithString: "把导出的包交给你的智能体，它领到免费通道后会给你一个通道码，粘到下方通道码框点「连接」即可。")
         claimHint.font = .systemFont(ofSize: 11)
         claimHint.textColor = .secondaryLabelColor
         claimHint.lineBreakMode = .byWordWrapping
@@ -96,7 +96,7 @@ final class OnboardingWindowController: NSObject {
         claimHint.frame = NSRect(x: 0, y: 6, width: FW, height: 44)
         claimGroup.addSubview(claimHint)
         // bot 组：兑换区只有领取串单输入（v0.19 定版，不再手填兑换码/数字 ID）
-        let botText = NSTextField(labelWithString: "免费名额已领完。去宠物 bot 做几个小任务，会领到一串「领取串」，整串粘到下面兑换：")
+        let botText = NSTextField(labelWithString: "免费通道的直领名额已领完，还可以从 bot 领：去宠物 bot 做几个小任务，会领到一串「领取串」，整串粘到下面兑换成免费通道：")
         botText.font = .systemFont(ofSize: 13, weight: .medium)
         botText.lineBreakMode = .byWordWrapping
         botText.maximumNumberOfLines = 2
@@ -124,8 +124,8 @@ final class OnboardingWindowController: NSObject {
         botGroup.isHidden = true
         cursor -= 156
 
-        // 配对串（两态常显，三路共同收尾）
-        let pairLabel = NSTextField(labelWithString: "配对串")
+        // 通道码（两态常显，三路共同收尾）
+        let pairLabel = NSTextField(labelWithString: "通道码")
         pairLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         pairLabel.frame = NSRect(x: X, y: cursor - 18, width: 120, height: 18)
         content.addSubview(pairLabel)
@@ -146,7 +146,7 @@ final class OnboardingWindowController: NSObject {
         cursor -= 12
 
         // 自建面板（两态常显，弱化）
-        let selfTitle = NSTextField(labelWithString: "自建中转（可选）")
+        let selfTitle = NSTextField(labelWithString: "自建通道（可选）")
         selfTitle.font = .systemFont(ofSize: 13, weight: .semibold)
         selfTitle.frame = NSRect(x: X, y: cursor - 18, width: 200, height: 18)
         content.addSubview(selfTitle)
@@ -160,7 +160,7 @@ final class OnboardingWindowController: NSObject {
         content.addSubview(genBtn)
         actionButtons.append(genBtn)
         cursor -= 34
-        let selfNote = NSTextField(labelWithString: "数据存在你自己的 Cloudflare、不占公共名额。把生成的包交给你的智能体，它会凭邮箱引导你完成部署；部署完把配对串粘回上面即可。")
+        let selfNote = NSTextField(labelWithString: "自建通道的数据存在你自己的 Cloudflare、不占免费通道名额。把生成的包交给你的智能体，它会凭邮箱引导你完成部署；部署完把通道码粘回上面即可。")
         selfNote.font = .systemFont(ofSize: 11)
         selfNote.textColor = .secondaryLabelColor
         selfNote.lineBreakMode = .byWordWrapping
@@ -217,19 +217,19 @@ final class OnboardingWindowController: NSObject {
                 guard error == nil, http == 200, let data,
                       let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                       let state = obj["state"] as? String else {
-                    self.statusLine.stringValue = "查不到名额状态（\(error?.localizedDescription ?? "HTTP \(http)")）。网络恢复后点重试；已有配对串可以直接粘到下面连接。"
+                    self.statusLine.stringValue = "查不到名额状态（\(error?.localizedDescription ?? "HTTP \(http)")）。网络恢复后点重试；已有通道码可以直接粘到下面连接。"
                     self.retryButton.isHidden = false
-                    PetLog.d("[onboarding] /status 失败 http=\(http) err=\(error?.localizedDescription ?? "-")（降级：配对串/自建仍可用）")
+                    PetLog.d("[onboarding] /status 失败 http=\(http) err=\(error?.localizedDescription ?? "-")（降级：通道码/自建仍可用）")
                     return
                 }
                 let left = (obj["free_left"] as? NSNumber)?.intValue ?? 0
                 if state == "open" {
-                    self.statusLine.stringValue = "公共中转：有名额"
-                    self.claimText.stringValue = "公共中转还有免费名额（剩余 \(left) 个），用领取 skill 让智能体帮你领一条："
+                    self.statusLine.stringValue = "免费通道：有名额"
+                    self.claimText.stringValue = "免费通道还有名额（剩余 \(left) 个），用领取 skill 让智能体帮你领一条免费通道："
                     self.claimGroup.isHidden = false
-                    PetLog.d("[onboarding] 分流=open free_left=\(left)，显示领取面板")
+                    PetLog.d("[onboarding] 分流=open free_left=\(left)，显示免费通道领取面板")
                 } else {
-                    self.statusLine.stringValue = "公共中转：已满员"
+                    self.statusLine.stringValue = "免费通道：直领名额已满"
                     self.botGroup.isHidden = false
                     PetLog.d("[onboarding] 分流=full，显示 bot 面板")
                 }
@@ -326,7 +326,7 @@ final class OnboardingWindowController: NSObject {
         case "code_expired": return "兑换失败：兑换码已过期（有效期 24 小时），回 bot 重新领一个新码。"
         case "code_revoked": return "兑换失败：这个码已被作废，回 bot 重新领一个。"
         case "tg_mismatch": return "兑换失败：这串领取串不是发给你的账号的（码与账号不匹配），回 bot 用你自己的账号重新领一串。"
-        case "already_claimed": return "这个 Telegram 账号已经领过通道了（一号一领）\(channel.map { "：\($0)" } ?? "")。请用当初的配对串连接。"
+        case "already_claimed": return "这个 Telegram 账号已经领过通道了（一号一领）\(channel.map { "：\($0)" } ?? "")。请用当初的通道码连接。"
         case "rate_limited": return "兑换失败：太频繁了，过一会儿再试。"
         case "busy": return "兑换失败：服务器繁忙，过一会儿再试。"
         case "bad_request", "bad_json": return "兑换失败：领取串内容格式不对，整串重新复制后重试。"
@@ -335,13 +335,13 @@ final class OnboardingWindowController: NSObject {
         }
     }
 
-    // MARK: - 配对串连接（共同收尾）
+    // MARK: - 通道码连接（共同收尾）
 
     @objc private func connectFromPairing() {
         let raw = pairingField.stringValue
         guard let parsed = PairingString.parse(raw) else {
-            feedback.stringValue = "配对串不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
-            PetLog.d("[onboarding] 配对串连接拦截：解码/校验未过")
+            feedback.stringValue = "通道码不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
+            PetLog.d("[onboarding] 通道码连接拦截：解码/校验未过")
             return
         }
         applyConnection(server: parsed.server, channel: parsed.channel, key: parsed.key, source: "pairing")
@@ -376,7 +376,7 @@ final class OnboardingWindowController: NSObject {
                 }
                 guard http == 200 || http == 204 else {
                     self.feedback.stringValue = http == 401
-                        ? "连接失败：钥不对或通道不存在（HTTP 401），核对配对串后重试。"
+                        ? "连接失败：钥不对或通道不存在（HTTP 401），核对通道码后重试。"
                         : "连接失败：服务器返回 HTTP \(http)。"
                     PetLog.d("[onboarding] 连接测试失败 http=\(http)（未落盘）")
                     return

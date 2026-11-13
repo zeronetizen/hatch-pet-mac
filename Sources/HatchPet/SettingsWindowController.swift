@@ -1,11 +1,13 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// 设置窗口：当前连接（只读展示）/ 配对串 / 轮询间隔 / 代理 + 测试连接 + 导出 skill 包。
-/// v0.20：配置只认配对串——服务器/通道名/accesskey 三字段手填已砍，设置里只读展示
-/// 现状（服务器/通道/钥掩码），换配置只能粘配对串应用（PairingString 校验后写入与
-/// 引导页同一套存储：UserDefaults + 本机钥文件，见 ChannelSettings/KeyFileStore）。
-/// v0.18：撤「注册新通道」（领取走引导/skill），配对块升级为 hatchpet1: 配对串；说明只留一行短提示 + 落地页链接。
+/// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 + 导出 skill 包。
+/// v0.21：连接区再简化——删掉只读展示块，只剩一行「通道：[粘贴框] 连接」+ 状态行；
+/// 连接凭证的用户面名称统一叫「通道码」（即 hatchpet1: 串，旧称配对串；wire 格式与
+/// PairingString 解析不变）。
+/// v0.20：配置只认通道码——服务器/通道名/accesskey 三字段手填已砍，换配置只能粘
+/// 通道码应用（PairingString 校验后写入与引导页同一套存储：UserDefaults + 本机钥
+/// 文件，见 ChannelSettings/KeyFileStore）。
 /// 服务器、通道名、间隔存 UserDefaults；accesskey 只存本机钥文件（权限 600，见 KeyFileStore），不用系统钥匙串。
 /// v0.15 起全量即时生效（macOS 系统设置风格，无「保存」按钮）：开关/下拉变更即落盘
 /// 应用；代理文本框在编辑结束（回车或失焦）时落盘应用。每次应用后经 onApplied 回调让
@@ -19,10 +21,10 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     var onReopenOnboarding: (() -> Void)?
 
     private var window: NSWindow?
-    /// 「当前连接」只读展示行（v0.20：三字段手填已砍，只展示不编辑）
-    private var serverValueLabel: NSTextField!
-    private var channelValueLabel: NSTextField!
-    private var keyValueLabel: NSTextField!
+    /// 当前连接状态行（v0.21：一行显示「当前连接：服务器 / 通道 · 状态」或「尚未配置通道」）
+    private var connectionStatusLabel: NSTextField!
+    /// 最近一次测连接结果（nil = 本次打开设置后未测）：状态行尾巴用，刷新见 refreshConnectionStatus
+    private var lastTestOK: Bool?
     private var pairingField: NSTextField!
     private var copyPairingButton: NSButton!
     private var intervalPopup: NSPopUpButton!
@@ -42,7 +44,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var appliedSnapshot: String?
 
     /// v0.18 起说明只留一行短提示，全部说明导向落地页（唯一出处）
-    private static let helpHint = "配置只认配对串；其余改动即时生效、无保存按钮。完整说明看落地页："
+    private static let helpHint = "配置只认通道码；其余改动即时生效、无保存按钮。完整说明看落地页："
 
     func show() {
         let window = ensureWindow()
@@ -61,7 +63,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         // 可视高时按屏幕收（下方说明区滚动高度随之变小，布局是光标驱动的、
         // 整体等比下移，不会错位）。
         let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
-        let W: CGFloat = 540, H: CGFloat = min(1000, visibleH - 16)
+        // v0.21：连接区简化后内容变矮，窗高同步从 1000 收到 876（少了展示块+提示行共 124）
+        let W: CGFloat = 540, H: CGFloat = min(876, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -84,42 +87,18 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
             return l
         }
 
-        // 当前连接（v0.20：只读展示——服务器/通道纯文本、钥只给掩码；换连接只能粘配对串）
-        let connTitle = NSTextField(labelWithString: "当前连接")
-        connTitle.font = .systemFont(ofSize: 13, weight: .semibold)
-        connTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
-        content.addSubview(connTitle)
-        cursor -= 26
-
-        func addValueRow(_ label: String, top: CGFloat) -> NSTextField {
-            _ = addLabel(label, top: top)
-            let v = NSTextField(labelWithString: "")
-            v.font = .systemFont(ofSize: 13)
-            v.lineBreakMode = .byTruncatingMiddle
-            v.frame = NSRect(x: fieldX, y: top - 22, width: fieldW, height: 20)
-            content.addSubview(v)
-            return v
-        }
-        serverValueLabel = addValueRow("服务器地址", top: cursor)
-        cursor -= 30
-        channelValueLabel = addValueRow("通道名", top: cursor)
-        cursor -= 30
-        keyValueLabel = addValueRow("accesskey", top: cursor)
-        keyValueLabel.textColor = .secondaryLabelColor
-        cursor -= 34
-
-        // 配对串（v0.20 起是唯一配置入口）：粘贴 hatchpet1: 串，校验后写入存储并连接；
-        // 同行区另有复制配对串与「重新走引导」入口
-        _ = addLabel("配对串", top: cursor)
-        pairingField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 132, height: 24))
-        pairingField.placeholderString = "hatchpet1:…（粘贴整串后点应用配对串）"
+        // 通道（v0.21：连接区只剩一行——粘贴通道码点「连接」换连接；通道码即
+        // hatchpet1: 串，PairingString 校验后写入存储并自动测连接）
+        _ = addLabel("通道", top: cursor)
+        pairingField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 88, height: 24))
+        pairingField.placeholderString = "粘贴通道码"
         content.addSubview(pairingField)
-        let pairConnectBtn = NSButton(title: "应用配对串", target: self, action: #selector(connectFromPairing))
+        let pairConnectBtn = NSButton(title: "连接", target: self, action: #selector(connectFromPairing))
         pairConnectBtn.bezelStyle = .rounded
-        pairConnectBtn.frame = NSRect(x: fieldX + fieldW - 124, y: cursor - 26, width: 124, height: 28)
+        pairConnectBtn.frame = NSRect(x: fieldX + fieldW - 80, y: cursor - 26, width: 80, height: 28)
         content.addSubview(pairConnectBtn)
         cursor -= 36
-        copyPairingButton = NSButton(title: "复制配对串", target: self, action: #selector(copyPairing))
+        copyPairingButton = NSButton(title: "复制通道码", target: self, action: #selector(copyPairing))
         copyPairingButton.bezelStyle = .rounded
         copyPairingButton.frame = NSRect(x: fieldX, y: cursor - 28, width: 130, height: 28)
         content.addSubview(copyPairingButton)
@@ -128,14 +107,14 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         reopenBtn.frame = NSRect(x: fieldX + 140, y: cursor - 28, width: 130, height: 28)
         content.addSubview(reopenBtn)
         cursor -= 34
-        let pairHint = NSTextField(labelWithString: "配置只认配对串：直领、bot 兑换、自建三路拿到的都是同一串，粘到这里点「应用配对串」即换连接。配对串含钥，只发信任对象。")
-        pairHint.font = .systemFont(ofSize: 11)
-        pairHint.textColor = .secondaryLabelColor
-        pairHint.lineBreakMode = .byWordWrapping
-        pairHint.maximumNumberOfLines = 2
-        pairHint.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
-        content.addSubview(pairHint)
-        cursor -= 34
+        // 当前连接状态行（v0.21）：一行说清现状，随载入/应用通道码/测连接结果刷新
+        connectionStatusLabel = NSTextField(labelWithString: "")
+        connectionStatusLabel.font = .systemFont(ofSize: 12)
+        connectionStatusLabel.textColor = .secondaryLabelColor
+        connectionStatusLabel.lineBreakMode = .byTruncatingMiddle
+        connectionStatusLabel.frame = NSRect(x: fieldX, y: cursor - 20, width: fieldW, height: 20)
+        content.addSubview(connectionStatusLabel)
+        cursor -= 30
 
         // 轮询间隔
         _ = addLabel("轮询间隔", top: cursor)
@@ -183,7 +162,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         testBtn.bezelStyle = .rounded
         testBtn.frame = NSRect(x: fieldX, y: cursor - 28, width: 110, height: 28)
         content.addSubview(testBtn)
-        statusLabel = NSTextField(labelWithString: "换连接请粘贴配对串；其余改动即时生效。")
+        statusLabel = NSTextField(labelWithString: "换连接请粘贴通道码；其余改动即时生效。")
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.maximumNumberOfLines = 3
@@ -334,7 +313,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         isLoading = true
         defer { isLoading = false }
         let cfg = ChannelSettings.load()
-        refreshConnectionDisplay(cfg)
+        lastTestOK = nil
+        refreshConnectionStatus()
         if let idx = ChannelSettings.intervalChoices.firstIndex(of: cfg.intervalSec) {
             intervalPopup.selectItem(at: idx)
         }
@@ -343,7 +323,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         proxyHostField.stringValue = cfg.proxy.host
         proxyPortField.stringValue = "\(cfg.proxy.port)"
         updateProxyControls()
-        statusLabel.stringValue = "换连接请粘贴配对串；其余改动即时生效。"
+        statusLabel.stringValue = "换连接请粘贴通道码；其余改动即时生效。"
         refreshExportState()
         refreshAssetRows()
         appliedSnapshot = snapshotFromFields()
@@ -351,18 +331,30 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         PetLog.d("设置窗口已载入 server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary) keyPresent=\(keyPresent)")
     }
 
-    /// 「当前连接」只读展示刷新（载入、应用配对串、即时应用后调用）：服务器/通道
-    /// 纯文本展示，accesskey 只给掩码 + 长度，绝不显示明文（v0.20）。
-    private func refreshConnectionDisplay(_ cfg: ChannelConfig = ChannelSettings.load()) {
-        serverValueLabel.stringValue = cfg.server
-        channelValueLabel.stringValue = cfg.channel.isEmpty ? "（未配置）" : cfg.channel
-        let key = ChannelSettings.accessKey(for: cfg.channel)
-        if let key, !key.isEmpty {
-            keyValueLabel.stringValue = "••••••••（\(key.count) 字符，已存本机）"
-        } else {
-            keyValueLabel.stringValue = "未保存"
+    /// 当前连接状态行刷新（载入、应用通道码、即时应用、测连接后调用）：未配置时
+    /// 「尚未配置通道」；已配置时按来源分称（v0.21 命名补充）——服务器是公共中转
+    /// 时「当前连接：免费通道（<通道名>）」，否则「当前连接：自建通道（<通道名> ·
+    /// <服务器域名>）」；尾巴状态取最近一次测连接结果（测过才带 · 已连接/连接失败）。
+    private func refreshConnectionStatus() {
+        let cfg = ChannelSettings.load()
+        let key = ChannelSettings.accessKey(for: cfg.channel) ?? ""
+        guard !cfg.channel.isEmpty, !key.isEmpty else {
+            connectionStatusLabel.stringValue = "尚未配置通道"
+            PetLog.d("[pairing] 连接状态行：尚未配置通道 channel空=\(cfg.channel.isEmpty) keyPresent=\(!key.isEmpty)")
+            return
         }
-        PetLog.d("[pairing] 当前连接展示 server=\(cfg.baseURL) channel=\(cfg.channel) keyPresent=\(!(key ?? "").isEmpty)")
+        var host = cfg.server
+        for scheme in ["https://", "http://"] where host.hasPrefix(scheme) {
+            host = String(host.dropFirst(scheme.count))
+        }
+        while host.hasSuffix("/") { host.removeLast() }
+        let suffix = lastTestOK.map { $0 ? " · 已连接" : " · 连接失败" } ?? ""
+        if cfg.baseURL == ChannelSettings.defaultServer {
+            connectionStatusLabel.stringValue = "当前连接：免费通道（\(cfg.channel)）\(suffix)"
+        } else {
+            connectionStatusLabel.stringValue = "当前连接：自建通道（\(cfg.channel) · \(host)）\(suffix)"
+        }
+        PetLog.d("[pairing] 连接状态行：\(connectionStatusLabel.stringValue)")
     }
 
     // MARK: - 代理小节
@@ -389,8 +381,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     // MARK: - 即时生效（v0.15）
 
     /// 文本框编辑结束（回车或失焦）即提交：落盘 + 应用 + 状态行反馈。
-    /// v0.20 起只剩代理主机/端口两个文本框走这条路径（连接三件套已改只读展示，
-    /// 换连接走配对串，见 connectFromPairing）。
+    /// v0.20 起只剩代理主机/端口两个文本框走这条路径（连接三件套已不可手填，
+    /// 换连接走通道码，见 connectFromPairing）。
     func controlTextDidEndEditing(_ obj: Notification) {
         guard !isLoading, let field = obj.object as? NSTextField else { return }
         switch field {
@@ -423,7 +415,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private func applyFromFields(feedback: String) {
         let cfg = configFromFields()
         ChannelSettings.save(cfg)
-        refreshConnectionDisplay(cfg)
+        refreshConnectionStatus()
         refreshExportState()
         appliedSnapshot = snapshotFromFields()
         onApplied?()
@@ -535,14 +527,14 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     // MARK: - Actions
 
     @objc private func testConnection() {
-        // 只读展示口径（v0.20）：测的是当前已保存并生效的连接；换连接先粘配对串应用。
+        // 测的是当前已保存并生效的连接；换连接先粘通道码点「连接」应用（v0.21）。
         let cfg = ChannelSettings.load()
         let base = cfg.baseURL
         let channel = cfg.channel
         let key = ChannelSettings.accessKey(for: channel) ?? ""
         guard !channel.isEmpty, !key.isEmpty else {
-            statusLabel.stringValue = "测试失败：尚未配置连接（先粘贴配对串点「应用配对串」）。"
-            PetLog.d("测试连接未执行：未配置连接 channel空=\(channel.isEmpty) key空=\(key.isEmpty)")
+            statusLabel.stringValue = "测试失败：尚未配置通道（先粘贴通道码点「连接」）。"
+            PetLog.d("测试连接未执行：未配置通道 channel空=\(channel.isEmpty) key空=\(key.isEmpty)")
             return
         }
         guard let url = URL(string: "\(base)/c/\(channel)") else {
@@ -561,6 +553,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let error {
+                    self.lastTestOK = false
+                    self.refreshConnectionStatus()
                     self.statusLabel.stringValue = "连接失败：\(error.localizedDescription)"
                     PetLog.d("测试连接网络错误：\(error.localizedDescription)")
                     return
@@ -571,7 +565,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
                     var msg = ""
                     if let data, let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                        let m = o["message"] as? String { msg = "：\(m)" }
-                    self.statusLabel.stringValue = "连接失败：HTTP \(http)\(msg)（检查服务器地址、通道名与钥是否匹配）"
+                    self.lastTestOK = false
+                    self.refreshConnectionStatus()
+                    self.statusLabel.stringValue = "连接失败：HTTP \(http)\(msg)（核对通道码后重试）"
                     PetLog.d("测试连接失败 HTTP \(http)\(msg)")
                     return
                 }
@@ -584,13 +580,15 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
                         timeText = "，数据时间 \(Self.timeString(ms: ts))"
                     }
                 }
+                self.lastTestOK = true
+                self.refreshConnectionStatus()
                 self.statusLabel.stringValue = "连接成功：seq=\(seq)，\(stateText)\(timeText)"
                 PetLog.d("测试连接成功 seq=\(seq) \(stateText)")
             }
         }.resume()
     }
 
-    // MARK: - 配对串（v0.18 引入；v0.20 起是唯一的连接配置入口）
+    // MARK: - 通道码（v0.18 引入 hatchpet1: 串；v0.21 起用户面统一称「通道码」，唯一的连接配置入口）
 
     @objc private func reopenOnboarding() {
         PetLog.d("[pairing] 设置页点「重新走引导」")
@@ -602,12 +600,12 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         NSWorkspace.shared.open(URL(string: "https://pet.8529527.xyz/")!)
     }
 
-    /// 应用配对串：PairingString 按 PROTOCOL 4 步解码校验 → 写入既有存储（服务器/
+    /// 应用通道码：PairingString 按 PROTOCOL 4 步解码校验 → 写入既有存储（服务器/
     /// 通道进 UserDefaults、钥进本机钥文件，与引导页同一套键）→ 即时生效 → 自动测
-    /// 连接。校验失败只提示、不动现有配置；成功后清空输入框（串含钥，不留明文）。
+    /// 连接。校验失败只提示、不动现有配置；成功后清空输入框（码含钥，不留明文）。
     @objc private func connectFromPairing() {
         guard let parsed = PairingString.parse(pairingField.stringValue) else {
-            statusLabel.stringValue = "配对串不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
+            statusLabel.stringValue = "通道码不对：应是 hatchpet1: 开头的一整串，原样粘贴、不要改动。"
             return
         }
         let cur = ChannelSettings.load()
@@ -616,33 +614,34 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         ChannelSettings.save(cfg)
         KeyFileStore.save(key: parsed.key, channel: parsed.channel)
         pairingField.stringValue = ""
-        refreshConnectionDisplay(cfg)
+        lastTestOK = nil
+        refreshConnectionStatus()
         refreshExportState()
         appliedSnapshot = snapshotFromFields()
         onApplied?()
-        PetLog.d("[pairing] 配对串已应用 server=\(parsed.server) channel=\(parsed.channel)（钥已存本机钥文件、输入框已清空），自动测连接")
-        statusLabel.stringValue = "配对串已应用并生效，正在测连接…"
+        PetLog.d("[pairing] 通道码已应用 server=\(parsed.server) channel=\(parsed.channel)（钥已存本机钥文件、输入框已清空），自动测连接")
+        statusLabel.stringValue = "通道码已应用并生效，正在测连接…"
         testConnection()
     }
 
-    /// 把当前配置组装成新配对串复制到剪贴板（取代 v1 三行配对块）。
+    /// 把当前配置组装成通道码复制到剪贴板。
     @objc private func copyPairing() {
         let channel = currentChannelName()
         guard !channel.isEmpty, let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
-            statusLabel.stringValue = "复制配对串失败：当前还没有保存在本机的连接（先粘贴一串配对串点「应用配对串」）。"
-            PetLog.d("[pairing] 复制配对串失败 channel=\(channel)：本机无钥")
+            statusLabel.stringValue = "复制通道码失败：当前还没有保存在本机的连接（先粘贴通道码点「连接」）。"
+            PetLog.d("[pairing] 复制通道码失败 channel=\(channel)：本机无钥")
             return
         }
         let str = PairingString.encode(server: currentServerBase(), channel: channel, key: key)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(str, forType: .string)
-        statusLabel.stringValue = "配对串已复制：整串发给你的智能体，它就能往这条通道写状态。配对串含钥，只发给信任的对象。"
-        PetLog.d("[pairing] 配对串已复制 channel=\(channel)（钥不记日志）")
+        statusLabel.stringValue = "通道码已复制：整串发给你的智能体，它就能往这条通道写状态。通道码含钥，只发给信任的对象。"
+        PetLog.d("[pairing] 通道码已复制 channel=\(channel)（钥不记日志）")
     }
 
     // MARK: - 导出 skill 包
 
-    /// 当前通道名与服务器基地址：以已保存并生效的配置为准（v0.20 只读展示口径）。
+    /// 当前通道名与服务器基地址：以已保存并生效的配置为准。
     private func currentChannelName() -> String {
         ChannelSettings.load().channel
     }
@@ -672,7 +671,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
             PetLog.d("导出 skill 可用 channel=\(channel)（钥在本机钥文件中）")
         } else {
             exportButton.isEnabled = false
-            exportHint.stringValue = "先粘贴配对串应用连接后可导出。"
+            exportHint.stringValue = "先粘贴通道码连接后可导出。"
             PetLog.d("导出 skill 不可用：本机无通道 \(channel) 的钥文件")
         }
     }
@@ -686,7 +685,7 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
             return
         }
         guard let key = ChannelSettings.accessKey(for: channel), !key.isEmpty else {
-            statusLabel.stringValue = "导出失败：本机没有保存通道「\(channel)」的 accesskey，请先粘贴配对串应用连接。"
+            statusLabel.stringValue = "导出失败：本机没有保存通道「\(channel)」的 accesskey，请先粘贴通道码连接。"
             PetLog.d("skill 导出失败 channel=\(channel)：本机无钥文件")
             refreshExportState()
             return

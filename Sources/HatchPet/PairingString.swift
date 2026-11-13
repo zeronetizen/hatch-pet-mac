@@ -1,10 +1,10 @@
 import Foundation
 
-/// 配对串（PROTOCOL v2）：`hatchpet1:` + base64url(JSON {v,server,channel,key})。
+/// 通道码（PROTOCOL v2，用户面名称；代码沿用 PairingString 命名）：`hatchpet1:` + base64url(JSON {v,server,channel,key})。
 /// 解码校验严格按协议 4 步：① 去空白、必须有大小写敏感的前缀；② base64url
 /// 解码 + JSON 解析，失败整体拒绝、绝不部分应用；③ v==1、server 非空 https、
 /// channel 匹配 [A-Za-z0-9_-]{1,64}、key 非空，未知字段忽略；④ 成功后钥按
-/// 凭证对待（存本机钥文件），原始配对串不落盘、不记日志。
+/// 凭证对待（存本机钥文件），原始通道码不落盘、不记日志。
 enum PairingString {
     static let prefix = "hatchpet1:"
 
@@ -22,7 +22,7 @@ enum PairingString {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        PetLog.d("[pairing] 已组装配对串 server=\(server) channel=\(channel) keyLen=\(key.count)（钥不记日志）")
+        PetLog.d("[pairing] 已组装通道码 server=\(server) channel=\(channel) keyLen=\(key.count)（钥不记日志）")
         return prefix + b64
     }
 
