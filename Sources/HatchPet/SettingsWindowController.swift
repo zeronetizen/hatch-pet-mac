@@ -2,8 +2,15 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 设置窗口：通道（粘贴通道码连接）/ 当前连接状态行 / 轮询间隔 / 代理 + 测试连接 / 形象 / 检查更新 / 关于。
-/// v0.29：状态行下方加一行当前通道码展示（只读单行框 + 「复制」按钮，由已存
-/// 配置当场拼整串；未配置时整行隐藏），供主人取用分发（多对一）。
+/// v0.30：按用户对 v0.29 设置页截图的逐条标注改——① 通道框已配置时直接显示
+/// 当前通道名（仍可粘新码换通道；内容未改就点「连接」时回「已是当前通道」）；
+/// ② 删 v0.29 新增的通道码展示行；③ 「复制通道码/重新走引导」同行加「导出
+/// SKILL」按钮（仅已配置时可见，导出 pet-claim 包且必带 pet-channel.json，
+/// 多对一交接）；④ 检查更新节收紧：状态文字改与按钮同行、无内容时不留空行；
+/// ⑤ 关于行版本号与「官网」按钮同行居中对齐；⑥ 删底部整行（左下版本小字 +
+/// 右下「关闭」按钮，关窗走标题栏按钮；windowWillClose 兜底保留）。
+/// v0.29：导出分流与 pet-claim 双模式（见 SkillExport）；其设置页通道码展示行
+/// 已于 v0.30 按用户标注删除。
 /// v0.27：通道码框设死单行（maximumNumberOfLines=1、cell usesSingleLineMode、
 /// 不换行可横滚，与引导页同口径）；v0.26 的字数提示文案全部去掉，粘贴清洗
 /// 保留但无声。连接行本就是一行横排（标签+框+连接），不改。
@@ -39,10 +46,9 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     private var lastTestOK: Bool?
     private var pairingField: NSTextField!
     private var copyPairingButton: NSButton!
-    /// 当前通道码展示行（v0.29）：标签 + 只读单行框 + 复制按钮；未配置时三件全隐藏
-    private var currentCodeLabel: NSTextField!
-    private var currentCodeField: NSTextField!
-    private var copyCodeButton: NSButton!
+    /// 「导出 SKILL」按钮（v0.30）：与复制通道码/重新走引导同行；仅已配置通道时
+    /// 可见（未配置 hidden，显隐在 refreshConnectionStatus 里切换）
+    private var exportSkillButton: NSButton!
     private var intervalPopup: NSPopUpButton!
     private var proxyCheckbox: NSButton!
     private var proxyTypePopup: NSPopUpButton!
@@ -70,12 +76,12 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
 
     private func ensureWindow() -> NSWindow {
         if let window { return window }
-        // 窗口高度按光标驱动布局的总 decrement 定：内容排满后底部留约 60 给
-        // 关闭按钮区；超过屏幕可视高时按屏幕收。
+        // 窗口高度按光标驱动布局的总 decrement 定；超过屏幕可视高时按屏幕收。
         let visibleH = NSScreen.main?.visibleFrame.height ?? 1060
-        // v0.29：加通道码展示行（-36），窗高从 710 涨到 746（总 decrement 666，
-        // 内容底边仍停在 60）；v0.25 时曾删代理/形象说明行各 -36
-        let W: CGFloat = 540, H: CGFloat = min(746, visibleH - 16)
+        // v0.30：删通道码展示行（-36）、检查更新状态行并入按钮行（-34）、底部
+        // 整行已删不再预留关闭按钮区——总 decrement 596、上下各留 20，窗高
+        // 从 746 收到 636
+        let W: CGFloat = 540, H: CGFloat = min(636, visibleH - 16)
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
@@ -124,6 +130,13 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         reopenBtn.bezelStyle = .rounded
         reopenBtn.frame = NSRect(x: fieldX + 140, y: cursor - 28, width: 130, height: 28)
         content.addSubview(reopenBtn)
+        // 「导出 SKILL」（v0.30）：同行第三个按钮；仅已配置通道时可见（导出
+        // pet-claim 包、必带 pet-channel.json，给另一个 Muse 做多对一交接）
+        exportSkillButton = NSButton(title: "导出 SKILL", target: self, action: #selector(exportSkill))
+        exportSkillButton.bezelStyle = .rounded
+        exportSkillButton.frame = NSRect(x: fieldX + 280, y: cursor - 28, width: 108, height: 28)
+        exportSkillButton.isHidden = true // 显隐随配置状态在 refreshConnectionStatus 里切换
+        content.addSubview(exportSkillButton)
         cursor -= 34
         // 当前连接状态行（v0.21）：一行说清现状，随载入/应用通道码/测连接结果刷新
         connectionStatusLabel = NSTextField(labelWithString: "")
@@ -133,27 +146,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         connectionStatusLabel.frame = NSRect(x: fieldX, y: cursor - 20, width: fieldW, height: 20)
         content.addSubview(connectionStatusLabel)
         cursor -= 30
-
-        // 当前通道码展示行（v0.29）：已配置时把已存 server+channel+钥当场拼成
-        // 整串、只读单行展示，供主人取用分发（多对一）；未配置时整行隐藏
-        // （布局位置恒定预留，显隐在 refreshConnectionStatus 里切换）。
-        currentCodeLabel = addLabel("通道码", top: cursor)
-        currentCodeField = NSTextField(frame: NSRect(x: fieldX, y: cursor - 24, width: fieldW - 88, height: 24))
-        currentCodeField.isEditable = false
-        currentCodeField.isSelectable = true
-        currentCodeField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        // 单行属性同其他码框：不换行、不撑高，长串框内横向滚动/裁剪
-        currentCodeField.maximumNumberOfLines = 1
-        currentCodeField.cell?.usesSingleLineMode = true
-        currentCodeField.cell?.wraps = false
-        currentCodeField.cell?.isScrollable = true
-        currentCodeField.lineBreakMode = .byClipping
-        content.addSubview(currentCodeField)
-        copyCodeButton = NSButton(title: "复制", target: self, action: #selector(copyPairing))
-        copyCodeButton.bezelStyle = .rounded
-        copyCodeButton.frame = NSRect(x: fieldX + fieldW - 80, y: cursor - 26, width: 80, height: 28)
-        content.addSubview(copyCodeButton)
-        cursor -= 36
 
         // 轮询间隔
         _ = addLabel("轮询间隔", top: cursor)
@@ -248,19 +240,20 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         updateTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
         content.addSubview(updateTitle)
         cursor -= 26
+        // v0.30：按钮与状态文字同行——按钮左界 fieldX 与其他节按钮一线，状态
+        // 文字在按钮右侧同行同高显示；状态行不再独占一行，无内容时不留空白
         let checkBtn = NSButton(title: "检查更新", target: self, action: #selector(checkUpdates))
         checkBtn.bezelStyle = .rounded
         checkBtn.frame = NSRect(x: fieldX, y: cursor - 27, width: 110, height: 26)
         content.addSubview(checkBtn)
-        cursor -= 32
         updateStatusLabel = NSTextField(labelWithString: "")
         updateStatusLabel.font = .systemFont(ofSize: 11)
         updateStatusLabel.textColor = .secondaryLabelColor
         updateStatusLabel.lineBreakMode = .byWordWrapping
         updateStatusLabel.maximumNumberOfLines = 2
-        updateStatusLabel.frame = NSRect(x: fieldX, y: cursor - 26, width: fieldW, height: 26)
+        updateStatusLabel.frame = NSRect(x: fieldX + 120, y: cursor - 27, width: fieldW - 120, height: 26)
         content.addSubview(updateStatusLabel)
-        cursor -= 36
+        cursor -= 34
 
         // 关于小节（v0.23）：只放一行版本 + 官网链接按钮，说明文字已全删
         let sep5 = NSBox(frame: NSRect(x: 20, y: cursor - 4, width: W - 40, height: 1))
@@ -272,9 +265,11 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         aboutTitle.frame = NSRect(x: 20, y: cursor - 18, width: 200, height: 18)
         content.addSubview(aboutTitle)
         cursor -= 26
+        // v0.30：版本文字与「官网」按钮整行对齐——文字框垂直居中对齐按钮
+        // （两者中心同在 cursor-14），左界 fieldX、按钮右界 fieldX+fieldW 与他行一致
         let aboutVer = NSTextField(labelWithString: AppVersion.displayString)
         aboutVer.font = .systemFont(ofSize: 12)
-        aboutVer.frame = NSRect(x: fieldX, y: cursor - 22, width: 220, height: 20)
+        aboutVer.frame = NSRect(x: fieldX, y: cursor - 24, width: 220, height: 20)
         content.addSubview(aboutVer)
         let landingBtn = NSButton(title: "官网", target: self, action: #selector(openLandingPage))
         landingBtn.bezelStyle = .rounded
@@ -282,20 +277,8 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         content.addSubview(landingBtn)
         cursor -= 32
 
-        // 底部按钮（v0.15 即时生效后只剩「关闭」：关窗不回滚，已生效的改动保留；
-        // 不给回车等价键——回车留给文本框提交编辑）
-        let closeBtn = NSButton(title: "关闭", target: self, action: #selector(closeWindow))
-        closeBtn.bezelStyle = .rounded
-        closeBtn.frame = NSRect(x: W - 120, y: 16, width: 100, height: 32)
-        content.addSubview(closeBtn)
-
-        // 底部左下角版本小字（运行时从 Info.plist 读，打包版本变了自动跟上）
-        let versionLabel = NSTextField(labelWithString: AppVersion.displayString)
-        versionLabel.font = .systemFont(ofSize: 11)
-        versionLabel.textColor = .secondaryLabelColor
-        versionLabel.frame = NSRect(x: 20, y: 24, width: 240, height: 16)
-        content.addSubview(versionLabel)
-        PetLog.d("设置窗口版本行：\(AppVersion.displayString)")
+        // v0.30：底部整行已删——左下角版本小字（与关于节版本重复）与右下角
+        // 「关闭」按钮一并移除；关窗走标题栏关闭钮，关窗兜底见 windowWillClose。
 
         self.window = win
         return win
@@ -326,25 +309,21 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
     /// 「尚未配置通道」；已配置时按来源分称（v0.21 命名补充）——服务器是公共中转
     /// 时「当前连接：免费通道（<通道名>）」，否则「当前连接：自建通道（<通道名> ·
     /// <服务器域名>）」；尾巴状态取最近一次测连接结果（测过才带 · 已连接/连接失败）。
-    /// 同时刷新 v0.29 的通道码展示行显隐与内容（未配置隐藏、已配置拼整串）。
+    /// v0.30 附带：通道框回显当前通道名（未配置则清空回待粘贴）、「导出 SKILL」
+    /// 按钮仅已配置时可见。通道框正在编辑（用户准备粘新码）时不抢其内容。
     private func refreshConnectionStatus() {
         let cfg = ChannelSettings.load()
         let key = ChannelSettings.accessKey(for: cfg.channel) ?? ""
         guard !cfg.channel.isEmpty, !key.isEmpty else {
             connectionStatusLabel.stringValue = "尚未配置通道"
-            // v0.29：未配置时通道码展示行整行隐藏、内容清空（不留钥残串）
-            currentCodeLabel.isHidden = true
-            currentCodeField.isHidden = true
-            copyCodeButton.isHidden = true
-            currentCodeField.stringValue = ""
+            exportSkillButton.isHidden = true
+            if pairingField.currentEditor() == nil { pairingField.stringValue = "" }
             PetLog.d("[pairing] 连接状态行：尚未配置通道 channel空=\(cfg.channel.isEmpty) keyPresent=\(!key.isEmpty)")
             return
         }
-        // v0.29：已配置时当场拼出当前通道码整串展示（复制走既有 copyPairing）
-        currentCodeLabel.isHidden = false
-        currentCodeField.isHidden = false
-        copyCodeButton.isHidden = false
-        currentCodeField.stringValue = PairingString.encode(server: cfg.baseURL, channel: cfg.channel, key: key)
+        exportSkillButton.isHidden = false
+        // 通道框直接显示当前通道名：免费通道即 free_…、自建即其通道名
+        if pairingField.currentEditor() == nil { pairingField.stringValue = cfg.channel }
         var host = cfg.server
         for scheme in ["https://", "http://"] where host.hasPrefix(scheme) {
             host = String(host.dropFirst(scheme.count))
@@ -424,11 +403,6 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         onApplied?()
         statusLabel.stringValue = feedback
         PetLog.d("设置即时生效：\(feedback)（server=\(cfg.baseURL) channel=\(cfg.channel) interval=\(cfg.intervalSec)s proxy=\(cfg.proxy.summary)）")
-    }
-
-    @objc private func closeWindow() {
-        PetLog.d("设置窗口关闭（即时生效，无未保存改动）")
-        window?.close()
     }
 
     /// 关窗兜底：若有文本改动没经「编辑结束」提交（例如改完直接点窗口关闭钮），
@@ -592,6 +566,17 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
 
     // MARK: - 通道码框粘贴清洗（v0.26）
 
+    /// 通道框开始编辑时若内容正是当前通道名（v0.30 的回显值），全选——用户
+    /// 多半是来粘新码的，全选后粘贴即整串替换，不会和通道名拼在一起解析失败。
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === pairingField else { return }
+        let cur = ChannelSettings.load()
+        guard !cur.channel.isEmpty, field.stringValue == cur.channel,
+              let editor = field.currentEditor() else { return }
+        editor.selectAll(nil)
+        PetLog.d("[pairing] 通道框开始编辑且内容为当前通道名，已全选待粘贴替换 channel=\(cur.channel)")
+    }
+
     /// 内容变化即清洗：去掉全部空白（换行、回车、空格）——剪贴板里的串被聊天
     /// 客户端折成多行时，粘进来立刻拼成一整串单行，不再被单行字段编辑器在
     /// 首个换行处截断。清洗确实改写了内容时把 caret 拉到串尾并滚动到可见。
@@ -624,6 +609,15 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
         onReopenOnboarding?()
     }
 
+    /// 导出 SKILL（v0.30）：导出 pet-claim 包——本按钮仅已配置通道时可见，
+    /// SkillExport 会自动附 pet-channel.json（v0.29 分流），接收方跳过领取
+    /// 直接写状态，多对一交接。保存流程与引导页导出一致（同一 SkillExport）。
+    @objc private func exportSkill() {
+        PetLog.d("[pairing] 设置页点「导出 SKILL」（pet-claim 包，附 pet-channel.json 多对一）")
+        statusLabel.stringValue = SkillExport.export(package: "pet-claim",
+                                                     suggestedName: "pet-claim-skill.zip")
+    }
+
     @objc private func openLandingPage() {
         PetLog.d("[about] 打开官网 https://pet.8529527.xyz/")
         NSWorkspace.shared.open(URL(string: "https://pet.8529527.xyz/")!)
@@ -631,23 +625,33 @@ final class SettingsWindowController: NSObject, NSTextFieldDelegate, NSWindowDel
 
     /// 应用通道码：PairingString 按 PROTOCOL 4 步解码校验 → 写入既有存储（服务器/
     /// 通道进 UserDefaults、钥进本机钥文件，与引导页同一套键）→ 即时生效 → 自动测
-    /// 连接。校验失败只提示、不动现有配置；成功后清空输入框（码含钥，不留明文）。
+    /// 连接。校验失败只提示、不动现有配置；成功后输入框回显新通道名（整串码含
+    /// 钥、不留在框里）。v0.30：框里是未改动的当前通道名时点「连接」，不报
+    /// 「通道码不对」，回「已是当前通道」。
     @objc private func connectFromPairing() {
+        let raw = pairingField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cur = ChannelSettings.load()
+        if !cur.channel.isEmpty, raw == cur.channel,
+           !(ChannelSettings.accessKey(for: cur.channel) ?? "").isEmpty {
+            statusLabel.stringValue = "已是当前通道（\(cur.channel)），无需重新连接。"
+            PetLog.d("[pairing] 点「连接」但框内容未改（当前通道名 channel=\(cur.channel)），提示已是当前通道")
+            return
+        }
         guard let parsed = PairingString.parse(pairingField.stringValue) else {
             statusLabel.stringValue = "通道码不对（应以 hatchpet1: 开头）。"
             return
         }
-        let cur = ChannelSettings.load()
         let cfg = ChannelConfig(server: parsed.server, channel: parsed.channel,
                                 intervalSec: cur.intervalSec, proxy: cur.proxy)
         ChannelSettings.save(cfg)
         KeyFileStore.save(key: parsed.key, channel: parsed.channel)
-        pairingField.stringValue = ""
+        window?.makeFirstResponder(nil) // 先收编辑态，下面的回显与状态刷新才稳定
+        pairingField.stringValue = parsed.channel // 回显新通道名，与刷新口径一致
         lastTestOK = nil
         refreshConnectionStatus()
         appliedSnapshot = snapshotFromFields()
         onApplied?()
-        PetLog.d("[pairing] 通道码已应用 server=\(parsed.server) channel=\(parsed.channel)（钥已存本机钥文件、输入框已清空），自动测连接")
+        PetLog.d("[pairing] 通道码已应用 server=\(parsed.server) channel=\(parsed.channel)（钥已存本机钥文件、输入框回显通道名），自动测连接")
         statusLabel.stringValue = "通道码已应用并生效，正在测连接…"
         testConnection()
     }
